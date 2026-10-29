@@ -1,0 +1,1315 @@
+import { notFound } from "next/navigation";
+import Link from "next/link";
+import { eq, desc, and, count } from "drizzle-orm";
+
+export const dynamic = "force-dynamic";
+
+import {
+  AlertCircle,
+  Bot,
+  ClipboardList,
+  ExternalLink,
+  FileDown,
+  Layers,
+  Link2,
+  MoreHorizontal,
+  Pencil,
+  Play,
+  RefreshCw,
+  RotateCw,
+  Search,
+  Sparkles,
+  Trash2,
+  Wand2,
+} from "lucide-react";
+import { db } from "@/db/client";
+import { audits, clients, keywords, tasks } from "@/db/schema";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { SubmitButton } from "@/components/ui/submit-button";
+import { SiteFavicon } from "@/components/ui/site-favicon";
+import { StatCard } from "@/components/ui/stat-card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { BrandingPreflightBanner } from "./branding-preflight-banner";
+import {
+  applyNicheTemplates,
+  applyStackTemplates,
+  redetectTechStack,
+  refreshClientMetadataForm,
+} from "../actions";
+import { pickStackTemplates, STACK_LABELS } from "@/lib/tech-stack-templates";
+import { runAuditForClient } from "@/app/audits/actions";
+import { ShareCard } from "./share-card";
+import { ClientGooglePanel } from "./google-panel";
+import { PerClientGoogleConnect } from "./per-client-google";
+import { GscKeywordsPanel } from "./gsc-keywords-panel";
+import { QuickWinsPanel } from "./quick-wins-panel";
+import { SnapshotSparklines } from "@/components/snapshot-sparklines";
+import { WpBridgePanel } from "./wp-bridge-panel";
+import { OrganicTrafficPanel } from "./organic-traffic-panel";
+import { ReportScheduleCard } from "./report-schedule-card";
+import { getGoogleConnectionStatus } from "@/lib/google-oauth";
+import { getSetting } from "@/lib/settings-store";
+import { getSmtpConfig } from "@/lib/mailer";
+import {
+  reportSchedules,
+  auditIssues,
+  keywordRankings,
+  backlinks,
+  reportArchives,
+  clientMetricSnapshots,
+  proposals,
+} from "@/db/schema";
+import { Dropdown } from "@/components/ui/dropdown";
+import { ClientToolsPanel } from "./client-tools-panel";
+import { StartHere } from "./start-here";
+import { NextActionsPanel } from "@/components/next-actions-panel";
+import { nextActions } from "@/lib/next-actions";
+import { surfacesFor } from "@/lib/engagement-surfaces";
+import { getAiAvailability } from "@/lib/ai-availability";
+import { DeleteClientButton } from "./delete-client-button";
+import { DailyAutomationCard } from "./daily-automation-card";
+import { inArray } from "drizzle-orm";
+import { headers } from "next/headers";
+import { Suspense } from "react";
+import { getAdsStatus } from "@/lib/google-ads";
+import { PlannerPanel } from "./planner-panel";
+import { Mail, Plug } from "lucide-react";
+
+const nicheLabels: Record<string, string> = {
+  local: "Local",
+  ecommerce: "E-commerce",
+  saas: "SaaS",
+  blog: "Blog",
+  services: "Services",
+};
+
+const nicheTone: Record<string, string> = {
+  local: "bg-violet-500/15 text-violet-300 ring-violet-500/20",
+  ecommerce: "bg-cyan-500/15 text-cyan-300 ring-cyan-500/20",
+  saas: "bg-amber-500/15 text-amber-300 ring-amber-500/20",
+  blog: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/20",
+  services: "bg-rose-500/15 text-rose-300 ring-rose-500/20",
+};
+
+/**
+ * Compact relative-time formatter for the client hero — "2 hours ago",
+ * "5 days ago", "3 months ago". Defaults to "today" for anything under
+ * an hour so the copy reads naturally even right after a fresh audit.
+ */
+function relativeTime(date: Date): string {
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 60 * 60) return "today";
+  const hours = Math.floor(seconds / 3600);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 9) return `${weeks} week${weeks === 1 ? "" : "s"} ago`;
+  const months = Math.floor(days / 30);
+  if (months < 18) return `${months} month${months === 1 ? "" : "s"} ago`;
+  const years = Math.floor(days / 365);
+  return `${years} year${years === 1 ? "" : "s"} ago`;
+}
+
+function PanelSkeleton({ title }: { title: string }) {
+  return (
+    <section className="glass-apple relative overflow-hidden rounded-2xl">
+      <header className="relative border-b border-white/[0.06] px-5 py-4">
+        <div className="text-sm text-muted-foreground">{title}</div>
+      </header>
+      <div className="space-y-2 p-5">
+        <Skeleton className="h-4 w-3/4" />
+        <Skeleton className="h-4 w-1/2" />
+        <Skeleton className="h-4 w-2/3" />
+      </div>
+    </section>
+  );
+}
+
+function ScoreBadge({ score }: { score: number | null }) {
+  let tone = "bg-muted/40 text-muted-foreground ring-border";
+  let textTone = "";
+  if (score !== null) {
+    if (score >= 80) {
+      tone = "bg-emerald-500/10 ring-emerald-500/30";
+      textTone = "text-gradient-emerald";
+    } else if (score >= 50) {
+      tone = "bg-amber-500/10 ring-amber-500/30";
+      textTone = "text-gradient-amber";
+    } else {
+      tone = "bg-rose-500/10 ring-rose-500/30";
+      textTone = "text-gradient-rose";
+    }
+  }
+  return (
+    <span
+      className={`inline-flex h-9 w-12 items-center justify-center rounded-lg text-sm font-bold ring-1 ring-inset ${tone} ${textTone}`}
+    >
+      {score ?? "—"}
+    </span>
+  );
+}
+
+export default async function ClientDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const { id } = await params;
+  const clientId = Number(id);
+  if (!Number.isFinite(clientId)) notFound();
+  const sp = (await searchParams) ?? {};
+  const brandingNeeded = sp["branding-needed"] === "1";
+  const brandingTemplate =
+    typeof sp.template === "string" ? sp.template : "executive";
+
+  const [client] = await db
+    .select()
+    .from(clients)
+    .where(eq(clients.id, clientId))
+    .limit(1);
+
+  if (!client) notFound();
+
+  const recentAudits = await db
+    .select()
+    .from(audits)
+    .where(eq(audits.clientId, clientId))
+    .orderBy(desc(audits.createdAt))
+    .limit(5);
+
+  // The crawl, specifically.
+  //
+  // The AI site audit writes into this same table with its own checks and
+  // its own scale, so "most recent completed audit" picked whichever ran
+  // last. On a client audited today that meant the hero showed the AI
+  // audit's 77/100 and 6 issues while the onboarding screen showed the
+  // crawl's 93/100 and 50 issues — two numbers for the same site, both
+  // labelled health score, seventeen seconds apart.
+  //
+  // next-actions.ts already filters on kind for the same reason and says
+  // so in its own comment. This is the second place that needed it.
+  const [latestCompleted] = await db
+    .select()
+    .from(audits)
+    .where(
+      and(
+        eq(audits.clientId, clientId),
+        eq(audits.status, "completed"),
+        eq(audits.kind, "crawler"),
+      ),
+    )
+    .orderBy(desc(audits.completedAt))
+    .limit(1);
+
+  const [{ value: openTaskCount }] = await db
+    .select({ value: count() })
+    .from(tasks)
+    .where(and(eq(tasks.clientId, clientId), eq(tasks.status, "todo")));
+
+  const [{ value: keywordCount }] = await db
+    .select({ value: count() })
+    .from(keywords)
+    .where(eq(keywords.clientId, clientId));
+
+  // Last ~8 snapshots, oldest-first, feed the StatCard sparklines.
+  // criticalIssues + highIssues are summed for the issues spark; the
+  // keywordCount column is reused directly. Open-task sparklines are
+  // skipped here because the snapshot table doesn't track them — the
+  // hint copy carries that read instead.
+  const recentSnapshots = await db
+    .select({
+      criticalIssues: clientMetricSnapshots.criticalIssues,
+      highIssues: clientMetricSnapshots.highIssues,
+      keywordCount: clientMetricSnapshots.keywordCount,
+      capturedAt: clientMetricSnapshots.capturedAt,
+    })
+    .from(clientMetricSnapshots)
+    .where(eq(clientMetricSnapshots.clientId, clientId))
+    .orderBy(desc(clientMetricSnapshots.capturedAt))
+    .limit(8);
+  const orderedSnapshots = recentSnapshots.slice().reverse();
+  const issuesSpark = orderedSnapshots
+    .map(
+      (s) =>
+        (s.criticalIssues ?? 0) + (s.highIssues ?? 0),
+    );
+  const keywordsSpark = orderedSnapshots
+    .map((s) => s.keywordCount)
+    .filter((v): v is number => v !== null);
+
+  // Counts shown in the delete-confirmation dialog so the user sees
+  // exactly what they're about to wipe.
+  const clientAuditIds = (
+    await db
+      .select({ id: audits.id })
+      .from(audits)
+      .where(eq(audits.clientId, clientId))
+  ).map((a) => a.id);
+  const clientKeywordIds = (
+    await db
+      .select({ id: keywords.id })
+      .from(keywords)
+      .where(eq(keywords.clientId, clientId))
+  ).map((k) => k.id);
+
+  const [
+    [{ value: deleteAuditCount }],
+    [{ value: deleteAuditIssueCount }],
+    [{ value: deleteTaskCount }],
+    [{ value: deleteRankingCount }],
+    [{ value: deleteBacklinkCount }],
+    [{ value: deleteReportCount }],
+    [{ value: deleteSnapshotCount }],
+  ] = await Promise.all([
+    db
+      .select({ value: count() })
+      .from(audits)
+      .where(eq(audits.clientId, clientId)),
+    clientAuditIds.length > 0
+      ? db
+          .select({ value: count() })
+          .from(auditIssues)
+          .where(inArray(auditIssues.auditId, clientAuditIds))
+      : Promise.resolve([{ value: 0 }]),
+    db
+      .select({ value: count() })
+      .from(tasks)
+      .where(eq(tasks.clientId, clientId)),
+    clientKeywordIds.length > 0
+      ? db
+          .select({ value: count() })
+          .from(keywordRankings)
+          .where(inArray(keywordRankings.keywordId, clientKeywordIds))
+      : Promise.resolve([{ value: 0 }]),
+    db
+      .select({ value: count() })
+      .from(backlinks)
+      .where(eq(backlinks.clientId, clientId)),
+    db
+      .select({ value: count() })
+      .from(reportArchives)
+      .where(eq(reportArchives.clientId, clientId)),
+    db
+      .select({ value: count() })
+      .from(clientMetricSnapshots)
+      .where(eq(clientMetricSnapshots.clientId, clientId)),
+  ]);
+
+  const redetectAction = redetectTechStack.bind(null, client.id);
+  const refreshMetadataAction = refreshClientMetadataForm.bind(null, client.id);
+  const runAction = runAuditForClient.bind(null, client.id);
+  const applyTemplatesAction = applyNicheTemplates.bind(null, client.id);
+  const applyStackAction = applyStackTemplates.bind(null, client.id);
+  const { matched: matchedStacks } = pickStackTemplates(client.techStack);
+  const googleStatus = await getGoogleConnectionStatus();
+  const adsStatus = await getAdsStatus();
+  const googleClientId = await getSetting<string>("google.client_id");
+  const googleClientSecret = await getSetting<string>("google.client_secret");
+  const hdrs = await headers();
+  const host =
+    hdrs.get("x-forwarded-host") ?? hdrs.get("host") ?? "localhost:3000";
+  const proto = hdrs.get("x-forwarded-proto") ?? "http";
+  const googleRedirectUri = `${proto}://${host}/api/google/callback`;
+
+  const smtpConfigured = Boolean(await getSmtpConfig());
+  // The approval document for this client, if one has been built. Newest
+  // first — re-running onboarding writes another, and the current one is
+  // the one the Start-here strip should be talking about.
+  const [approvalDoc] = await db
+    .select({ id: proposals.id, status: proposals.status })
+    .from(proposals)
+    .where(eq(proposals.clientId, clientId))
+    .orderBy(desc(proposals.id))
+    .limit(1);
+
+  // Drives the ready/blocked dots in the per-client tool rail. `hasKey`,
+  // not `available` — the rail is asking whether the tool page you are
+  // about to open can call a model itself.
+  const ai = await getAiAvailability();
+  // Ranked work for this client alone. The Start-here strip above covers
+  // setup; this covers everything after it, and says which half the agent
+  // will take.
+  const ranked = await nextActions({ clientId, limit: 8 });
+  const [scheduleRow] = await db
+    .select()
+    .from(reportSchedules)
+    .where(eq(reportSchedules.clientId, clientId))
+    .orderBy(desc(reportSchedules.updatedAt))
+    .limit(1);
+
+  return (
+    <div className="space-y-6">
+      {brandingNeeded && (
+        <BrandingPreflightBanner
+          clientId={clientId}
+          template={brandingTemplate}
+        />
+      )}
+
+      {/*
+        Two-column layout on desktop:
+          left   — sticky tools sidebar (per-client, all tools pre-wired)
+          right  — the main client content (hero, stats, automations,
+                   integrations, recent activity, etc.)
+
+        Below md the sidebar collapses to a button + sheet so the main
+        content gets full width.
+      */}
+      {/* The order to do things in, before the wall of tools. */}
+      <StartHere
+        clientId={client.id}
+        auditDone={Boolean(latestCompleted)}
+        auditFindings={latestCompleted?.issuesCount ?? null}
+        keywordCount={keywordCount}
+        proposalId={approvalDoc?.id ?? null}
+        proposalStatus={approvalDoc?.status ?? null}
+        onboardingDone={client.onboardingStep === "completed"}
+      />
+
+      <NextActionsPanel
+        items={ranked}
+        heading="What's worth doing for this client"
+        emptyNote="Nothing ranked yet — run an audit and this fills in."
+        showClient={false}
+      />
+
+      <div className="flex flex-col gap-6 md:flex-row md:items-start">
+        <ClientToolsPanel
+          client={{
+            id: client.id,
+            url: client.url,
+            gscProperty: client.gscProperty,
+            gbpUrl: client.gbpUrl,
+            ga4PropertyId: client.ga4PropertyId,
+            wpEndpoint: client.wpEndpoint,
+          }}
+          hasAiKey={ai.hasKey}
+          surfaces={surfacesFor(client.surfacesJson, client.niche)}
+        />
+
+        <div className="min-w-0 flex-1 space-y-6">
+      {/*
+        HERO — editorial composition.
+        Top accent rule colored by score band gives the card a magazine-masthead
+        feel. Left column owns identity; right column makes the score the
+        unambiguous focal point with a tabular display number + horizontal
+        strength bar.
+        Action row collapses 10 buttons into a hero CTA + 4 primaries + a
+        "More" overflow so the visual weight reads as decisive, not busy.
+      */}
+      {(() => {
+        const score = latestCompleted?.score ?? null;
+        const tone: "muted" | "emerald" | "amber" | "rose" =
+          score === null
+            ? "muted"
+            : score >= 75
+              ? "emerald"
+              : score >= 50
+                ? "amber"
+                : "rose";
+        const toneClasses = {
+          muted: {
+            number: "text-muted-foreground",
+            bar: "bg-muted-foreground/30",
+            stripe: "from-transparent via-border to-transparent",
+            ringFavicon: "ring-border",
+            chipLabel: "text-muted-foreground",
+            chipBg: "bg-muted/40 ring-border",
+          },
+          emerald: {
+            number: "text-emerald-300",
+            bar: "bg-emerald-400",
+            stripe: "from-emerald-500/0 via-emerald-400/70 to-emerald-500/0",
+            ringFavicon: "ring-emerald-500/40",
+            chipLabel: "text-emerald-300",
+            chipBg: "bg-emerald-500/10 ring-emerald-500/30",
+          },
+          amber: {
+            number: "text-amber-300",
+            bar: "bg-amber-400",
+            stripe: "from-amber-500/0 via-amber-400/70 to-amber-500/0",
+            ringFavicon: "ring-amber-500/40",
+            chipLabel: "text-amber-300",
+            chipBg: "bg-amber-500/10 ring-amber-500/30",
+          },
+          rose: {
+            number: "text-rose-300",
+            bar: "bg-rose-400",
+            stripe: "from-rose-500/0 via-rose-400/70 to-rose-500/0",
+            ringFavicon: "ring-rose-500/40",
+            chipLabel: "text-rose-300",
+            chipBg: "bg-rose-500/10 ring-rose-500/30",
+          },
+        }[tone];
+        const auditedLabel = latestCompleted?.completedAt
+          ? relativeTime(latestCompleted.completedAt)
+          : null;
+        const auditedDateFull = latestCompleted?.completedAt
+          ? latestCompleted.completedAt.toLocaleDateString(undefined, {
+              year: "numeric",
+              month: "short",
+              day: "numeric",
+            })
+          : null;
+        const barFill = score === null ? 0 : Math.max(2, Math.min(100, score));
+
+        // The hero card is deliberately NOT overflow-hidden.
+        //
+        // It was, to clip the masthead stripe to the rounded corners —
+        // and it clipped the "Generate report" menu too, which opens
+        // downward from a button inside this card. The card's bottom
+        // edge sat 130px above the menu's, so the user saw one item of
+        // three and a box cut in half. The stripe rounds its own top
+        // corners instead, which is all the clipping was ever for.
+        // Anything added here that needs clipping should clip itself.
+        return (
+          <section className="relative rounded-2xl border border-border bg-card shadow-xl">
+            {/* Score-colored masthead stripe */}
+            <div
+              aria-hidden
+              className={`h-px w-full rounded-t-2xl bg-gradient-to-r ${toneClasses.stripe}`}
+            />
+
+            <div className="p-6 sm:p-8">
+              {/* Breadcrumb — editorial micro caps */}
+              <nav
+                aria-label="Breadcrumb"
+                className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+              >
+                <Link
+                  href="/clients"
+                  className="rounded-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                >
+                  Clients
+                </Link>
+                <span aria-hidden className="text-muted-foreground/40">·</span>
+                <span aria-current="page" className="truncate text-foreground/80">
+                  {client.name}
+                </span>
+              </nav>
+
+              {/* Headline grid */}
+              <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1fr)_320px]">
+                {/* LEFT — identity */}
+                <div className="min-w-0 space-y-5">
+                  <div className="flex items-start gap-4">
+                    <span
+                      className={`shrink-0 rounded-2xl ring-2 ring-offset-2 ring-offset-card transition-colors ${toneClasses.ringFavicon}`}
+                    >
+                      <SiteFavicon
+                        url={client.url}
+                        name={client.name}
+                        size={56}
+                      />
+                    </span>
+                    <div className="min-w-0 space-y-2">
+                      <h1 className="break-words text-[2.25rem] font-bold leading-[1.02] tracking-tight text-foreground sm:text-[2.75rem] lg:text-5xl">
+                        {client.name}
+                      </h1>
+                      <a
+                        href={client.url}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        aria-label={`${client.url} — opens in a new tab`}
+                        className="group inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted/40 px-2 py-1 font-mono text-[12px] text-muted-foreground ring-1 ring-inset ring-border transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                      >
+                        <span className="truncate">
+                          {client.url.replace(/^https?:\/\//, "")}
+                        </span>
+                        <ExternalLink
+                          aria-hidden
+                          className="size-3 shrink-0 opacity-60 group-hover:opacity-100"
+                        />
+                      </a>
+                    </div>
+                  </div>
+
+                  {/* Metadata strip */}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+                    {client.niche && (
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${nicheTone[client.niche] ?? "bg-muted text-muted-foreground"}`}
+                      >
+                        <Sparkles className="size-3" />
+                        {nicheLabels[client.niche] ?? client.niche}
+                      </span>
+                    )}
+                    {client.techStack && client.techStack.length > 0 && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-muted/60 px-2.5 py-0.5 text-[11px] text-muted-foreground ring-1 ring-inset ring-border">
+                        <Layers className="size-3" />
+                        {client.techStack.length} tech
+                        {client.techStack.length === 1 ? "" : "s"} detected
+                      </span>
+                    )}
+                    {auditedLabel && latestCompleted?.completedAt && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <span
+                          aria-hidden
+                          className="size-1 rounded-full bg-muted-foreground/50"
+                        />
+                        <span>
+                          Audited{" "}
+                          <time
+                            dateTime={latestCompleted.completedAt.toISOString()}
+                          >
+                            {auditedLabel}
+                          </time>
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* RIGHT — score panel.
+                    Wrapped in <dl> so the caption / number / sub-metadata
+                    relate semantically — screen readers announce as
+                    "Health score: 32 out of 100. 13 issues found. May 12,
+                    2026." */}
+                <dl
+                  className="relative lg:border-l lg:border-border lg:pl-8"
+                  aria-label="Latest audit summary"
+                >
+                  <dt className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                    Health score
+                  </dt>
+                  <dd className="mt-2 flex items-baseline gap-2">
+                    <span
+                      className={`font-bold tabular-nums leading-none ${toneClasses.number}`}
+                      style={{ fontSize: "clamp(4rem, 6vw, 5.5rem)" }}
+                      aria-label={
+                        score === null
+                          ? "No score yet"
+                          : `${score} out of 100`
+                      }
+                    >
+                      {score === null ? "—" : score}
+                    </span>
+                    <span
+                      aria-hidden
+                      className="text-xl font-medium text-muted-foreground/60"
+                    >
+                      /100
+                    </span>
+                  </dd>
+                  {/* Strength bar — decorative; the numeric label above
+                      already carries the semantic value. Animation guarded
+                      by motion-safe so prefers-reduced-motion users get an
+                      instant fill. */}
+                  <dd
+                    aria-hidden
+                    className="mt-4 h-1 w-full overflow-hidden rounded-full bg-muted/40"
+                  >
+                    <div
+                      className={`h-full rounded-full motion-safe:transition-[width] motion-safe:duration-700 ${toneClasses.bar}`}
+                      style={{ width: `${barFill}%` }}
+                    />
+                  </dd>
+                  <dd className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                    {latestCompleted ? (
+                      <>
+                        <span className="font-medium text-foreground/80 tabular-nums">
+                          {latestCompleted.issuesCount}
+                        </span>
+                        <span>issues found</span>
+                        <span aria-hidden className="text-muted-foreground/40">
+                          ·
+                        </span>
+                        {latestCompleted.completedAt && (
+                          <time
+                            dateTime={latestCompleted.completedAt.toISOString()}
+                          >
+                            {auditedDateFull}
+                          </time>
+                        )}
+                      </>
+                    ) : (
+                      <span>
+                        Run an audit to score this site — takes ~30 seconds.
+                      </span>
+                    )}
+                  </dd>
+                </dl>
+              </div>
+
+              {/* Hairline + action row */}
+              <div className="mt-7 border-t border-border pt-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* HERO action — Run audit */}
+                  <form action={runAction}>
+                    <SubmitButton
+                      icon={<Play className="size-3.5" />}
+                      pendingChildren="Running audit…"
+                      pendingToast="Starting audit"
+                      pendingToastDescription="Crawling the site and running 30+ checks. Takes ~30-60 s."
+                    >
+                      Run audit
+                    </SubmitButton>
+                  </form>
+
+                  {/* Generate report dropdown */}
+                  <Dropdown
+                    width={240}
+                    className={buttonVariants({ variant: "outline" })}
+                    trigger={
+                      <>
+                        <FileDown className="size-3.5" />
+                        Generate report
+                      </>
+                    }
+                  >
+                    <div>
+                      <Link
+                        href={`/reports/${client.id}?template=executive`}
+                        className="block px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="font-medium">Executive</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          Score, summary, top issues — 1 page
+                        </div>
+                      </Link>
+                      <Link
+                        href={`/reports/${client.id}?template=detailed`}
+                        className="block border-t border-border px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="font-medium">Detailed</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          Full report — work done + next steps
+                        </div>
+                      </Link>
+                      <Link
+                        href={`/reports/${client.id}?template=technical`}
+                        className="block border-t border-border px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="font-medium">Technical</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          Every issue + URLs — engineering
+                        </div>
+                      </Link>
+                    </div>
+                  </Dropdown>
+
+                  {/* Primary AI surface */}
+                  <Link
+                    href={`/clients/${client.id}/ai-audit`}
+                    className={buttonVariants({
+                      variant: "outline",
+                      className: "border-violet-500/30 bg-violet-500/10",
+                    })}
+                  >
+                    <Bot className="size-3.5" />
+                    AI audit
+                  </Link>
+
+                  {/* Onboarding — emphasised when not completed */}
+                  <Link
+                    href={`/clients/${client.id}/onboarding`}
+                    className={buttonVariants({
+                      variant: "outline",
+                      className:
+                        client.onboardingStep === "completed"
+                          ? ""
+                          : "border-violet-500/40 bg-violet-500/10 text-violet-200",
+                    })}
+                    title={
+                      client.onboardingStep === "completed"
+                        ? "Re-run onboarding to refresh keywords + plan"
+                        : "Smart onboarding — auto-generates a 30-day plan"
+                    }
+                  >
+                    <Sparkles className="size-3.5" />
+                    {client.onboardingStep === "completed"
+                      ? "Re-plan"
+                      : "Smart onboarding"}
+                  </Link>
+
+                  {/* Overflow — everything else */}
+                  <div className="ml-auto">
+                  <Dropdown
+                    align="right"
+                    width={224}
+                    className={buttonVariants({ variant: "outline" })}
+                    trigger={
+                      <>
+                        <MoreHorizontal className="size-3.5" />
+                        More
+                      </>
+                    }
+                  >
+                    <div>
+                      <Link
+                        href={`/agent/c/${client.id}`}
+                        className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <Bot className="size-3.5 text-violet-300" />
+                        AI agent
+                      </Link>
+                      <Link
+                        href={`/clients/${client.id}/plan`}
+                        className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <Layers className="size-3.5 text-violet-300" />
+                        30-day plan
+                      </Link>
+                      <Link
+                        href={`/findings/c/${client.id}`}
+                        className="flex items-center gap-2 border-t border-border px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <ClipboardList className="size-3.5 text-cyan-300" />
+                        What the tools found
+                      </Link>
+                      <Link
+                        href={`/blog/${client.id}`}
+                        className="flex items-center gap-2 border-t border-border px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <Wand2 className="size-3.5 text-violet-300" />
+                        AI blog
+                      </Link>
+                      <Link
+                        href={`/guest-posts/c/${client.id}`}
+                        className="flex items-center gap-2 border-t border-border px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <Wand2 className="size-3.5 text-amber-300" />
+                        Guest posts
+                      </Link>
+                      <Link
+                        href={`/link-building/c/${client.id}`}
+                        className="flex items-center gap-2 border-t border-border px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <Link2 className="size-3.5 text-emerald-300" />
+                        Backlinks
+                      </Link>
+                      <Link
+                        href={`/clients/${client.id}/edit`}
+                        className="flex items-center gap-2 border-t border-border px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <Pencil className="size-3.5 text-muted-foreground" />
+                        Edit client
+                      </Link>
+                      <form
+                        action={refreshMetadataAction}
+                        className="border-t border-border"
+                      >
+                        <SubmitButton
+                          variant="ghost"
+                          icon={
+                            <RefreshCw className="size-3.5 text-muted-foreground" />
+                          }
+                          pendingChildren="Refreshing…"
+                          pendingToast="Refreshing site metadata"
+                          pendingToastDescription="Re-fetching logo, NAP, tech stack…"
+                          title="Re-fetch logo, address, social links, and tech stack from the live site"
+                          className="w-full justify-start rounded-none px-3 py-2 text-sm font-normal hover:bg-accent"
+                        >
+                          Refresh metadata
+                        </SubmitButton>
+                      </form>
+                    </div>
+                  </Dropdown>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        );
+      })()}
+
+      {/* STATS — or inviting empty-state when this client has no data yet */}
+      {latestCompleted || keywordCount > 0 || openTaskCount > 0 ? (
+        (() => {
+          // Snapshot-driven deltas. We compare the latest snapshot's
+          // value to the snapshot from ~7 days ago (or the oldest we
+          // have if there aren't enough). Only shown when both ends
+          // exist so we don't fabricate movement.
+          const lastIdx = orderedSnapshots.length - 1;
+          const baseIdx = Math.max(0, lastIdx - 6);
+          const issuesDelta =
+            lastIdx > baseIdx && issuesSpark.length >= 2
+              ? issuesSpark[issuesSpark.length - 1] - issuesSpark[baseIdx]
+              : null;
+          const kwDelta =
+            lastIdx > baseIdx && keywordsSpark.length >= 2
+              ? keywordsSpark[keywordsSpark.length - 1] -
+                keywordsSpark[baseIdx]
+              : null;
+
+          return (
+            <div className="grid gap-4 sm:grid-cols-3">
+              <StatCard
+                label="Open issues"
+                value={latestCompleted?.issuesCount ?? 0}
+                accent="amber"
+                icon={AlertCircle}
+                hint="From last audit"
+                // The other two cards on this row count rows in our own
+                // database and need no provenance. This one describes
+                // the client's website, which is a claim about the
+                // outside world and can be out of date.
+                source="crawl"
+                asOf={latestCompleted?.completedAt ?? null}
+                spark={issuesSpark.length >= 2 ? issuesSpark : undefined}
+                delta={
+                  issuesDelta !== null
+                    ? { value: issuesDelta, label: "vs prior" }
+                    : undefined
+                }
+              />
+              <StatCard
+                label="Open tasks"
+                value={openTaskCount}
+                accent="violet"
+                icon={ClipboardList}
+                hint="Auto-generated + manual"
+              />
+              <StatCard
+                label="Tracked keywords"
+                value={keywordCount}
+                accent="cyan"
+                icon={Search}
+                hint={
+                  keywordCount === 0 ? "Not tracking any yet" : "In rotation"
+                }
+                spark={keywordsSpark.length >= 2 ? keywordsSpark : undefined}
+                delta={
+                  kwDelta !== null
+                    ? { value: kwDelta, label: "vs prior" }
+                    : undefined
+                }
+              />
+            </div>
+          );
+        })()
+      ) : (
+        <section className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-cyan-500/[0.04] via-violet-500/[0.03] to-transparent p-6">
+          <div className="pointer-events-none absolute -right-10 -top-10 size-40 rounded-full bg-cyan-500/10 blur-3xl" />
+          <header className="relative">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-300">
+              Get started
+            </p>
+            <h2 className="mt-2 text-xl font-semibold">
+              No data for {client.name} yet — let&apos;s seed it.
+            </h2>
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              Pick any of the three to bootstrap this client. You can do them
+              in any order, and the AI agent will start filling in the rest
+              within 24h.
+            </p>
+          </header>
+          <div className="relative mt-5 grid gap-3 sm:grid-cols-3">
+            <form action={runAction} className="contents">
+              <button
+                type="submit"
+                className="group flex flex-col items-start gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/[0.06] p-4 text-left transition-colors hover:bg-cyan-500/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                <span className="grid size-8 place-items-center rounded-lg bg-cyan-500/15 text-cyan-300 ring-1 ring-inset ring-cyan-500/30">
+                  <Play className="size-4" />
+                </span>
+                <div>
+                  <div className="text-sm font-semibold">Run an audit</div>
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    30+ SEO checks. ~60 seconds. Sets the baseline health
+                    score.
+                  </div>
+                </div>
+                <span className="mt-1 text-[11px] font-medium text-cyan-300 transition-transform group-hover:translate-x-0.5">
+                  Run now →
+                </span>
+              </button>
+            </form>
+            <Link
+              href={`/keywords?clientId=${client.id}`}
+              className="group flex flex-col items-start gap-2 rounded-xl border border-violet-500/30 bg-violet-500/[0.04] p-4 transition-colors hover:bg-violet-500/[0.10]"
+            >
+              <span className="grid size-8 place-items-center rounded-lg bg-violet-500/15 text-violet-300 ring-1 ring-inset ring-violet-500/30">
+                <Search className="size-4" />
+              </span>
+              <div>
+                <div className="text-sm font-semibold">Track keywords</div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  10-15 keywords gives the AI enough signal to spot quick
+                  wins.
+                </div>
+              </div>
+              <span className="mt-1 text-[11px] font-medium text-violet-300 transition-transform group-hover:translate-x-0.5">
+                Add keywords →
+              </span>
+            </Link>
+            <Link
+              href={`/clients/${client.id}/onboarding`}
+              className="group flex flex-col items-start gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.04] p-4 transition-colors hover:bg-emerald-500/[0.10]"
+            >
+              <span className="grid size-8 place-items-center rounded-lg bg-emerald-500/15 text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
+                <Sparkles className="size-4" />
+              </span>
+              <div>
+                <div className="text-sm font-semibold">Smart onboarding</div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  AI inspects the site and auto-generates a 30-day SEO plan.
+                </div>
+              </div>
+              <span className="mt-1 text-[11px] font-medium text-emerald-300 transition-transform group-hover:translate-x-0.5">
+                Auto-plan →
+              </span>
+            </Link>
+          </div>
+        </section>
+      )}
+
+      {/* DAILY AUTOMATION ENTRY — schedules + queue, per client */}
+      <DailyAutomationCard clientId={client.id} />
+
+      {/* GOOGLE INTEGRATION */}
+      <section className="relative overflow-hidden rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <div className="pointer-events-none absolute -right-12 -top-12 size-40 rounded-full bg-violet-500/15 blur-3xl" />
+        <header className="relative flex items-center justify-between border-b border-white/5 px-5 py-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-base font-semibold">
+              <Plug className="size-4 text-violet-300" />
+              Google Search Console + Analytics
+              {client.gscProperty || client.ga4PropertyId ? (
+                <span className="ml-1 inline-flex rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
+                  Linked
+                </span>
+              ) : (
+                <span className="ml-1 inline-flex rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-white/10">
+                  Optional
+                </span>
+              )}
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Real keyword data + traffic for this client. Pick once — runs in
+              the background after that.
+            </p>
+          </div>
+        </header>
+        <div className="relative p-5 space-y-4">
+          <ClientGooglePanel
+            clientId={client.id}
+            initialGsc={client.gscProperty}
+            initialGa4={client.ga4PropertyId}
+            status={googleStatus}
+            redirectUri={googleRedirectUri}
+            initialClientId={googleClientId}
+            hasSecret={Boolean(googleClientSecret)}
+          />
+          <PerClientGoogleConnect
+            clientId={client.id}
+            connectedEmail={client.googleConnectedEmail}
+            hasWorkspaceCreds={
+              !!googleClientId && !!googleClientSecret
+            }
+          />
+        </div>
+      </section>
+
+      {/* LIVE GOOGLE DATA — only when properties are linked */}
+      {googleStatus.configured && client.ga4PropertyId && (
+        <Suspense
+          fallback={
+            <PanelSkeleton title="Loading organic traffic from Analytics…" />
+          }
+        >
+          <OrganicTrafficPanel propertyId={client.ga4PropertyId} />
+        </Suspense>
+      )}
+
+      {adsStatus.ready && (
+        <Suspense
+          fallback={<PanelSkeleton title="Asking Keyword Planner for ideas…" />}
+        >
+          <PlannerPanel clientId={client.id} />
+        </Suspense>
+      )}
+
+      {googleStatus.configured && client.gscProperty && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Suspense
+            fallback={
+              <PanelSkeleton title="Loading top keywords from Search Console…" />
+            }
+          >
+            <GscKeywordsPanel siteUrl={client.gscProperty} />
+          </Suspense>
+          <Suspense
+            fallback={<PanelSkeleton title="Finding quick wins…" />}
+          >
+            <QuickWinsPanel siteUrl={client.gscProperty} />
+          </Suspense>
+        </div>
+      )}
+
+      {/* SNAPSHOT TRENDS — sparklines over time */}
+      <Suspense fallback={null}>
+        <SnapshotSparklines clientId={client.id} />
+      </Suspense>
+
+      {/* WP one-click bridge */}
+      <WpBridgePanel
+        clientId={client.id}
+        isConnected={Boolean(client.wpEndpoint && client.wpKey)}
+        endpoint={client.wpEndpoint ?? null}
+        looksLikeWordPress={(client.techStack ?? []).some((t) =>
+          String(t).toLowerCase().includes("wordpress"),
+        )}
+      />
+
+      {/* SCHEDULED REPORTS */}
+      <section className="relative overflow-hidden rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <div className="pointer-events-none absolute -left-12 -bottom-12 size-40 rounded-full bg-cyan-500/10 blur-3xl" />
+        <header className="relative flex items-center justify-between border-b border-white/5 px-5 py-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-base font-semibold">
+              <Mail className="size-4 text-cyan-300" />
+              Scheduled report email
+              {scheduleRow ? (
+                <span className="ml-1 inline-flex rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
+                  Active
+                </span>
+              ) : (
+                <span className="ml-1 inline-flex rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-white/10">
+                  Optional
+                </span>
+              )}
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Auto-deliver the branded PDF to client + team on a schedule. Or
+              hit &ldquo;Send now&rdquo; below to email it on demand.
+            </p>
+          </div>
+        </header>
+        <div className="relative p-5">
+          <ReportScheduleCard
+            clientId={client.id}
+            smtpConfigured={smtpConfigured}
+            schedule={
+              scheduleRow
+                ? {
+                    id: scheduleRow.id,
+                    template: scheduleRow.template,
+                    frequency: scheduleRow.frequency,
+                    dayOfMonth: scheduleRow.dayOfMonth,
+                    dayOfWeek: scheduleRow.dayOfWeek,
+                    hourOfDay: scheduleRow.hourOfDay,
+                    recipients: scheduleRow.recipients,
+                    enabled: scheduleRow.enabled,
+                    lastSentAt: scheduleRow.lastSentAt,
+                    nextSendAt: scheduleRow.nextSendAt,
+                  }
+                : null
+            }
+          />
+        </div>
+      </section>
+
+      {/* TECH STACK */}
+      <section className="relative overflow-hidden rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <div className="pointer-events-none absolute -left-12 -bottom-12 size-40 rounded-full bg-cyan-500/10 blur-3xl" />
+        <header className="relative flex items-center justify-between border-b border-white/5 px-5 py-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-base font-semibold">
+              <Layers className="size-4 text-cyan-300" />
+              Tech stack
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Detected from HTML + HTTP headers — drives every recommendation
+            </p>
+          </div>
+          <form action={redetectAction}>
+            <Button
+              type="submit"
+              variant="outline"
+              size="sm"
+              className=""
+            >
+              <RotateCw className="size-3" />
+              Re-detect
+            </Button>
+          </form>
+        </header>
+        <div className="relative p-5">
+          {client.techStack && client.techStack.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {client.techStack.map((tech) => (
+                <span
+                  key={tech}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-medium text-foreground/90"
+                >
+                  <span className="size-1.5 rounded-full bg-gradient-to-br from-cyan-400 to-violet-400" />
+                  {tech}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Nothing detected yet. The site may have been unreachable when we
+              looked — try Re-detect.
+            </p>
+          )}
+        </div>
+      </section>
+
+      {/* NICHE */}
+      {client.niche && (
+        <section className="relative overflow-hidden rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+          <div className="pointer-events-none absolute -right-12 -top-12 size-40 rounded-full bg-violet-500/15 blur-3xl" />
+          <header className="relative flex items-center justify-between border-b border-white/5 px-5 py-4">
+            <div>
+              <h2 className="flex items-center gap-2 text-base font-semibold">
+                <Sparkles className="size-4 text-violet-300" />
+                Niche tasks
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Starter task list for{" "}
+                <span className="font-medium text-foreground">
+                  {nicheLabels[client.niche] ?? client.niche}
+                </span>{" "}
+                — duplicates are skipped on re-apply
+              </p>
+            </div>
+            <form action={applyTemplatesAction}>
+              <Button
+                type="submit"
+                variant="outline"
+                size="sm"
+                className=""
+              >
+                <RotateCw className="size-3" />
+                Re-apply templates
+              </Button>
+            </form>
+          </header>
+        </section>
+      )}
+
+      {/* TECH-STACK CHECKLIST */}
+      <section className="relative overflow-hidden rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <div className="pointer-events-none absolute -right-12 -top-12 size-40 rounded-full bg-cyan-500/15 blur-3xl" />
+        <header className="relative flex items-center justify-between border-b border-white/5 px-5 py-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-base font-semibold">
+              <Layers className="size-4 text-cyan-300" />
+              Tech-stack checklist
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {matchedStacks.length === 1 && matchedStacks[0] === "custom"
+                ? "Generic SEO checklist (no major CMS detected)"
+                : `Tasks tailored for ${matchedStacks
+                    .map((s) => STACK_LABELS[s])
+                    .join(" + ")}`}
+            </p>
+          </div>
+          <form action={applyStackAction}>
+            <Button
+              type="submit"
+              variant="outline"
+              size="sm"
+              className=""
+            >
+              <RotateCw className="size-3" />
+              Re-apply checklist
+            </Button>
+          </form>
+        </header>
+        <div className="relative p-5 text-sm text-muted-foreground">
+          <div className="flex flex-wrap gap-2">
+            {matchedStacks.map((s) => (
+              <span
+                key={s}
+                className="rounded-full bg-cyan-500/15 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-inset ring-cyan-500/30"
+              >
+                {STACK_LABELS[s]}
+              </span>
+            ))}
+          </div>
+          <p className="mt-3 text-xs">
+            We auto-applied platform-specific SEO tasks when this client was
+            added. Tasks include actionable next steps with the exact plugin /
+            setting / step for the detected platform.
+          </p>
+        </div>
+      </section>
+
+      {/* RECENT AUDITS */}
+      <section className="relative overflow-hidden rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <div className="pointer-events-none absolute -left-12 -top-12 size-40 rounded-full bg-cyan-500/10 blur-3xl" />
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <ClipboardList className="size-4 text-cyan-300" />
+            Recent audits
+          </h2>
+        </header>
+        <div className="relative">
+          {recentAudits.length === 0 ? (
+            <p className="px-5 py-8 text-center text-sm text-muted-foreground">
+              No audits yet. Click Run audit above to do your first one.
+            </p>
+          ) : (
+            <ul className="divide-y divide-white/5">
+              {recentAudits.map((a) => (
+                <li
+                  key={a.id}
+                  className="flex items-center justify-between gap-3 px-5 py-3.5 text-sm transition-colors hover:bg-white/[0.03]"
+                >
+                  <Link
+                    href={`/audits/${a.id}`}
+                    className="font-medium hover:underline"
+                  >
+                    Audit #{a.id}
+                  </Link>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-muted-foreground">
+                      {a.status}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {a.issuesCount} issues
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {(a.completedAt ?? a.createdAt).toLocaleDateString()}
+                    </span>
+                    <ScoreBadge score={a.score ?? null} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+
+      <ShareCard
+        clientId={client.id}
+        shareToken={client.shareToken}
+        clientEmail={client.email}
+      />
+
+      {/* DANGER ZONE */}
+      <section className="relative overflow-hidden rounded-2xl border border-rose-500/20 bg-rose-500/5 backdrop-blur-md">
+        <header className="border-b border-rose-500/20 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-rose-300">
+            <Trash2 className="size-4" />
+            Danger zone
+          </h2>
+        </header>
+        <div className="p-5">
+          <DeleteClientButton
+            clientId={client.id}
+            clientName={client.name}
+            counts={{
+              audits: deleteAuditCount,
+              auditIssues: deleteAuditIssueCount,
+              tasks: deleteTaskCount,
+              keywords: clientKeywordIds.length,
+              rankings: deleteRankingCount,
+              backlinks: deleteBacklinkCount,
+              reports: deleteReportCount,
+              snapshots: deleteSnapshotCount,
+            }}
+          />
+        </div>
+      </section>
+        </div>
+      </div>
+    </div>
+  );
+}

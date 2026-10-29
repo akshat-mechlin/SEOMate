@@ -1,0 +1,314 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1777583745701,
+      "tag": "0000_red_madame_web",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1777587687238,
+      "tag": "0001_closed_vargas",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1777588145584,
+      "tag": "0002_crazy_jamie_braddock",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1777589459138,
+      "tag": "0003_silky_magik",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1777589584978,
+      "tag": "0004_sudden_vampiro",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1777624560126,
+      "tag": "0005_tough_colossus",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1777639692169,
+      "tag": "0006_mixed_newton_destine",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1777639819243,
+      "tag": "0007_good_multiple_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1777658245322,
+      "tag": "0008_noisy_santa_claus",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1777659051559,
+      "tag": "0009_sour_boomer",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1777659369313,
+      "tag": "0010_previous_freak",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1777673555130,
+      "tag": "0011_sour_nitro",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1777676742759,
+      "tag": "0012_swift_lorna_dane",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1777678131502,
+      "tag": "0013_marvelous_roughhouse",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1777681520811,
+      "tag": "0014_sweet_queen_noir",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1777684248485,
+      "tag": "0015_special_boomer",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1777685056355,
+      "tag": "0016_steep_master_mold",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1777685386982,
+      "tag": "0017_certain_thena",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1777689328974,
+      "tag": "0018_luxuriant_imperial_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1777691393111,
+      "tag": "0019_sloppy_puck",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1778000000000,
+      "tag": "0020_task_time_tracking",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1778000100000,
+      "tag": "0021_serp_features_and_bot_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1778000200000,
+      "tag": "0022_per_client_google_oauth",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "6",
+      "when": 1785587254191,
+      "tag": "0053_realign_journal",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "6",
+      "when": 1785600578201,
+      "tag": "0054_users_and_teams",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "6",
+      "when": 1785603457611,
+      "tag": "0055_ranking_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "6",
+      "when": 1785604999856,
+      "tag": "0056_agent_autonomy",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "6",
+      "when": 1785606399966,
+      "tag": "0057_report_batches",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "6",
+      "when": 1785638306654,
+      "tag": "0058_audit_pages_crawled",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1785647520250,
+      "tag": "0059_grader_leads",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "6",
+      "when": 1785649676236,
+      "tag": "0060_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "6",
+      "when": 1785669233630,
+      "tag": "0061_agent_cms_revision",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "6",
+      "when": 1788428522369,
+      "tag": "0062_proposal_baseline_timeline",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "6",
+      "when": 1788492043562,
+      "tag": "0063_ambitious_phalanx",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "6",
+      "when": 1788931150100,
+      "tag": "0064_pretty_sersi",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "6",
+      "when": 1789231481116,
+      "tag": "0066_client_context",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "6",
+      "when": 1789233122546,
+      "tag": "0067_gbp_reviews",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "6",
+      "when": 1789233417765,
+      "tag": "0068_gbp_location_name",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "6",
+      "when": 1789285242451,
+      "tag": "0069_bot_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "6",
+      "when": 1789286252189,
+      "tag": "0070_page_monitor_severity",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "6",
+      "when": 1792998755180,
+      "tag": "0071_client_local_path",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "6",
+      "when": 1793002436908,
+      "tag": "0072_task_chat",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "6",
+      "when": 1793003300299,
+      "tag": "0073_client_github_pr",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "6",
+      "when": 1793006047757,
+      "tag": "0074_client_autopilot",
+      "breakpoints": true
+    }
+  ]
+}
