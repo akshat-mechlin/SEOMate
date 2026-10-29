@@ -1,0 +1,113 @@
+export const dynamic = "force-dynamic";
+
+import { FileText } from "lucide-react";
+import { redirect } from "next/navigation";
+import { db } from "@/db/client";
+import {
+  clients,
+  audits,
+  reportSchedules,
+} from "@/db/schema";
+import { desc, eq, and, count } from "drizzle-orm";
+import { PageHeader } from "@/components/shell/page-header";
+import { clientScope } from "@/lib/client-scope";
+import {
+  ClientToolGrid,
+  type ClientToolCard,
+} from "@/components/shell/client-tool-grid";
+
+export default async function ReportsIndexPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ clientId?: string; embed?: string }>;
+}) {
+  // Opened from a client, so the client is already chosen.
+  //
+  // The "Tools for this client" rail links here with ?clientId=, and
+  // this page ignored it and drew the picker anyway — so picking a
+  // client and then picking a tool asked you to pick the client again.
+  // The per-client page it would have sent you to already exists.
+  const { clientId, embed } = await searchParams;
+  if (clientId && /^\d+$/.test(clientId)) {
+    // Carry ?embed=1 through. Without it the drawer would load the
+    // full shell inside itself — a sidebar inside a sidebar.
+    redirect(`/reports/c/${clientId}${embed ? "?embed=1" : ""}`);
+  }
+
+  const all = await db.select().from(clients).where(await clientScope()).orderBy(desc(clients.createdAt));
+
+  const cards: ClientToolCard[] = await Promise.all(
+    all.map(async (c) => {
+      const [latest] = await db
+        .select()
+        .from(audits)
+        .where(
+          and(eq(audits.clientId, c.id), eq(audits.status, "completed")),
+        )
+        .orderBy(desc(audits.completedAt))
+        .limit(1);
+
+      const [{ value: scheduled }] = await db
+        .select({ value: count() })
+        .from(reportSchedules)
+        .where(
+          and(
+            eq(reportSchedules.clientId, c.id),
+            eq(reportSchedules.enabled, true),
+          ),
+        );
+
+      return {
+        id: c.id,
+        name: c.name,
+        url: c.url,
+        logoUrl: c.logoUrl,
+        niche: c.niche,
+        primary: latest
+          ? `Score ${latest.score ?? "—"}/100`
+          : "No data yet",
+        primaryTone: latest
+          ? latest.score === null
+            ? "neutral"
+            : latest.score >= 80
+              ? "emerald"
+              : latest.score >= 50
+                ? "amber"
+                : "rose"
+          : "neutral",
+        secondary: latest
+          ? `Last audit ${(latest.completedAt ?? latest.createdAt).toLocaleDateString()}`
+          : "Run an audit to populate the report",
+        badges:
+          scheduled > 0
+            ? [
+                {
+                  label: `${scheduled} schedule${scheduled === 1 ? "" : "s"}`,
+                  tone: "emerald" as const,
+                },
+              ]
+            : undefined,
+      };
+    }),
+  );
+
+  return (
+    <div className="mx-auto max-w-7xl space-y-6">
+      <PageHeader
+        title="Reports"
+        description="Pick a client to download their branded SEO report as PDF, view a live preview, or grab the raw data as CSV."
+        icon={FileText}
+        accent="cyan"
+        actions={
+          <a
+            href="/reports/export.csv"
+            className="inline-flex h-9 items-center rounded-md border border-white/10 bg-white/5 px-3 text-xs font-medium text-muted-foreground hover:bg-white/10 hover:text-foreground"
+          >
+            Export all CSV
+          </a>
+        }
+      />
+      <ClientToolGrid cards={cards} basePath="/reports/c" />
+    </div>
+  );
+}

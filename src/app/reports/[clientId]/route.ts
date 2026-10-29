@@ -1,0 +1,109 @@
+import { NextResponse } from "next/server";
+import {
+  generateReportPdf,
+  type ReportTemplate,
+} from "@/lib/report-generator";
+import { eq } from "drizzle-orm";
+import { db } from "@/db/client";
+import { clients, reportArchives } from "@/db/schema";
+import { getSetting } from "@/lib/settings-store";
+import { canAccessClient } from "@/lib/client-scope";
+
+export const dynamic = "force-dynamic";
+
+const ALLOWED: ReportTemplate[] = [
+  "executive",
+  "detailed",
+  "technical",
+  "ceo",
+  "cmo",
+  "cto",
+  "junior",
+];
+
+function safeFilename(name: string): string {
+  return name.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "client";
+}
+
+export async function GET(
+  request: Request,
+  ctx: { params: Promise<{ clientId: string }> },
+) {
+  const { clientId } = await ctx.params;
+  const id = Number(clientId);
+  if (!Number.isFinite(id)) {
+    return NextResponse.json({ error: "Invalid client id" }, { status: 400 });
+  }
+  if (!(await canAccessClient(id))) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const url = new URL(request.url);
+  const tplParam = url.searchParams.get("template") as ReportTemplate | null;
+  const template: ReportTemplate =
+    tplParam && ALLOWED.includes(tplParam) ? tplParam : "detailed";
+
+  const [client] = await db
+    .select()
+    .from(clients)
+    .where(eq(clients.id, id))
+    .limit(1);
+  if (!client) {
+    return NextResponse.json({ error: "Client not found" }, { status: 404 });
+  }
+
+  // Branding pre-flight: if workspace brand isn't set up AND the user
+  // hasn't opted out for this client, bounce them back to the client
+  // page with a banner. They can either set branding or check "skip".
+  if (!client.brandingSkipped) {
+    const [brandName, brandLogo] = await Promise.all([
+      getSetting<string>("brand.name"),
+      getSetting<string>("brand.logo_data_url"),
+    ]);
+    if (!brandName || !brandLogo) {
+      const back = new URL(`/clients/${id}`, request.url);
+      back.searchParams.set("branding-needed", "1");
+      back.searchParams.set("template", template);
+      return NextResponse.redirect(back);
+    }
+  }
+
+  let pdf: Buffer;
+  try {
+    pdf = await generateReportPdf(id, template);
+  } catch (err) {
+    return NextResponse.json(
+      { error: (err as Error).message },
+      { status: 500 },
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0];
+  const filename = `${safeFilename(client.name)}-${template}-${today}.pdf`;
+
+  // Archive — fire-and-forget, never block the download on a DB error.
+  const periodEnd = new Date();
+  const periodStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  void db
+    .insert(reportArchives)
+    .values({
+      clientId: id,
+      title: `${client.name} — ${template} report — ${today}`,
+      periodStart,
+      periodEnd,
+      template,
+      pdfBase64: pdf.toString("base64"),
+      pdfBytes: pdf.length,
+    })
+    .catch(() => undefined);
+
+  // @ts-expect-error - Buffer is valid BodyInit at runtime
+  return new NextResponse(pdf, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Length": String(pdf.length),
+    },
+  });
+}

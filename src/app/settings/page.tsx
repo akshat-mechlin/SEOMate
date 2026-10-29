@@ -1,0 +1,743 @@
+export const dynamic = "force-dynamic";
+
+import path from "node:path";
+import { headers } from "next/headers";
+import { count } from "drizzle-orm";
+import Link from "next/link";
+import {
+  ArrowRight,
+  Bell,
+  Brain,
+  Clock,
+  CheckCircle2,
+  Globe,
+  Database,
+  Key,
+  Mail,
+  Palette,
+  Plug,
+  Settings as SettingsIcon,
+  Shield,
+  Terminal,
+  Sparkles,
+  Users2,
+} from "lucide-react";
+import { SmtpForm } from "./smtp-form";
+import { getGoogleConnectionStatus } from "@/lib/google-oauth";
+import { db } from "@/db/client";
+import { audits, clients, keywords, tasks, users } from "@/db/schema";
+import { PageHeader } from "@/components/shell/page-header";
+import { getSetting } from "@/lib/settings-store";
+import {
+  configuredProviders,
+  getActiveProvider,
+  getOllamaUrl,
+} from "@/lib/api-keys";
+import { WebhookForm } from "./webhook-form";
+import { TimeZoneForm } from "./timezone-form";
+import { HostAgentForm } from "./host-agent-form";
+import { hostAgentState } from "@/lib/host-agent";
+import { BrandForm } from "./brand-form";
+import { ApiKeysSection } from "./api-keys-section";
+import { ActiveProviderCard } from "./active-provider-card";
+import { CreditSaverForm } from "./credit-saver-form";
+import { ConnectionModePicker } from "./connection-mode";
+import { MCP_TOOL_LIST } from "@/lib/mcp/server";
+import {
+  getAiConnectionStatus,
+  getConnectionMode,
+  getMcpStatus,
+} from "./connection-mode-actions";
+import { BrowserForm } from "./browser-form";
+import { loadBrowserSettings } from "./browser-actions";
+import { ApiKeyManager } from "./api-keys/manager";
+import { db as dbClient } from "@/db/client";
+import { apiKeys, inboundWebhooks } from "@/db/schema";
+import { desc as descSql } from "drizzle-orm";
+import { InboundWebhooksManager } from "./inbound-webhooks/manager";
+
+export default async function SettingsPage() {
+  const [{ value: clientCount }] = await db
+    .select({ value: count() })
+    .from(clients);
+  const [{ value: auditCount }] = await db
+    .select({ value: count() })
+    .from(audits);
+  const [{ value: taskCount }] = await db
+    .select({ value: count() })
+    .from(tasks);
+  const [{ value: keywordCount }] = await db
+    .select({ value: count() })
+    .from(keywords);
+  const [{ value: teamCount }] = await db
+    .select({ value: count() })
+    .from(users);
+
+  const dbPath =
+    process.env.SEO_DB_PATH ?? path.join(process.cwd(), "data.db");
+  const dbAbsolutePath = path.resolve(dbPath);
+
+  const webhookUrl = await getSetting<string>("webhook.url");
+  const brandName = await getSetting<string>("brand.name");
+  const brandColor = await getSetting<string>("brand.color");
+  const brandLogo = await getSetting<string>("brand.logo_data_url");
+  const brandTagline = await getSetting<string>("brand.tagline");
+  const brandWebsite = await getSetting<string>("brand.website");
+  const brandEmail = await getSetting<string>("brand.email");
+  const brandPhone = await getSetting<string>("brand.phone");
+  const brandFooter = await getSetting<string>("brand.footer_text");
+  const { byId: configuredKeys } = await configuredProviders();
+  const ollamaUrl = await getOllamaUrl();
+  const activeProvider = await getActiveProvider();
+  const creditSaverOn = Boolean(
+    await getSetting<boolean>("ai.credit_saver.enabled"),
+  );
+  const defaultModel = (await getSetting<string>("ai.default_model")) ?? null;
+  const connectionMode = await getConnectionMode();
+  const aiStatus = await getAiConnectionStatus();
+  const mcpStatus = await getMcpStatus();
+  // Read here rather than from window.location in the client component:
+  // the two disagree during hydration and React errors on the mismatch.
+  const hdrs = await headers();
+  const host = hdrs.get("host") ?? "localhost:3000";
+  const proto = hdrs.get("x-forwarded-proto") ?? "http";
+  const appOrigin = `${proto}://${host}`;
+  const googleStatus = await getGoogleConnectionStatus();
+
+  // SMTP config — read individually so we can pass an "initial" object to the
+  // form without leaking the password value
+  const smtpHost = await getSetting<string>("smtp.host");
+  const smtpPort = await getSetting<string>("smtp.port");
+  const smtpUser = await getSetting<string>("smtp.user");
+  const smtpFromEmail = await getSetting<string>("smtp.from_email");
+  const smtpFromName = await getSetting<string>("smtp.from_name");
+  const smtpSecure = await getSetting<string>("smtp.secure");
+  const smtpHasPassword = Boolean(await getSetting<string>("smtp.password"));
+  const browserSettings = await loadBrowserSettings();
+
+  const apiKeyRows = await dbClient
+    .select()
+    .from(apiKeys)
+    .orderBy(descSql(apiKeys.createdAt))
+    .limit(50);
+  const inboundWebhookRows = await dbClient
+    .select()
+    .from(inboundWebhooks)
+    .orderBy(descSql(inboundWebhooks.createdAt))
+    .limit(50);
+
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return (
+    <div className="mx-auto max-w-5xl space-y-6">
+      <PageHeader
+        title="Settings"
+        description="Workspace preferences, integrations, and where your data lives."
+        icon={SettingsIcon}
+        accent="violet"
+      />
+
+      {/* Compact workspace strip + jump TOC. Replaces what used to be
+          a full section with 4 read-only rows. Mode + timezone are the
+          only bits worth surfacing; everything else is fixed today. */}
+      <section className="rounded-xl border border-border bg-card/40 p-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+          <span className="inline-flex items-center gap-1.5 font-medium">
+            <span className="size-1.5 rounded-full bg-emerald-400" />
+            {teamCount > 0
+              ? `Local · ${teamCount} ${teamCount === 1 ? "account" : "accounts"}`
+              : "Local · single-user"}
+          </span>
+          <span className="text-muted-foreground">{tz}</span>
+          <span className="text-muted-foreground">Dark mode</span>
+          <Link
+            href="/shortcuts"
+            className="ml-auto inline-flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Sparkles className="size-3" />
+            Keyboard shortcuts
+            <ArrowRight className="size-3" />
+          </Link>
+        </div>
+      </section>
+
+      {/* Jump TOC, sub-grouped. The flat 12-pill row was the symptom of
+          the "Settings has 50+ rows on one page" usability complaint —
+          users couldn't tell which pill was a primary setup step and
+          which was a niche admin knob. Grouped into 5 buckets the
+          mental model becomes scannable in one glance:
+            Setup     — the 3 things every new user needs (AI / Google / Email)
+            Brand     — anything that flows onto exported PDFs + portal
+            Power     — integrations a pro reaches for occasionally
+            Advanced  — performance + browser pool + AI learning controls
+            About     — privacy
+          Anchors and section IDs are preserved so deep-links keep working. */}
+      <nav
+        aria-label="Settings sections"
+        className="space-y-2 text-xs"
+      >
+        {(
+          [
+            {
+              label: "Setup",
+              items: [
+                { href: "#ai", label: "AI keys", primary: true },
+                { href: "#google", label: "Google" },
+                { href: "#team", label: "Team" },
+                { href: "#email", label: "Email" },
+              ],
+            },
+            {
+              label: "Brand",
+              items: [{ href: "#brand", label: "Brand identity" }],
+            },
+            {
+              label: "Power",
+              items: [
+                { href: "#notify", label: "Notifications" },
+                { href: "#api", label: "API access" },
+                { href: "#data", label: "Data" },
+              ],
+            },
+            {
+              label: "Advanced",
+              items: [
+                { href: "#claude-code", label: "Claude Code" },
+                { href: "#browser", label: "Browser pool" },
+                { href: "#ai-learning", label: "AI learning" },
+              ],
+            },
+            {
+              label: "About",
+              items: [
+                { href: "#privacy", label: "Privacy" },
+              ],
+            },
+          ] as const
+        ).map((group) => (
+          <div key={group.label} className="flex flex-wrap items-center gap-1.5">
+            <span className="w-16 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+              {group.label}
+            </span>
+            {group.items.map((t) => {
+              const primary = "primary" in t && t.primary;
+              return (
+                <a
+                  key={t.href}
+                  href={t.href}
+                  className={`rounded-md px-2 py-1 ring-1 ring-inset transition-colors ${
+                    primary
+                      ? "bg-violet-500/15 text-violet-300 ring-violet-500/30 hover:bg-violet-500/25"
+                      : "bg-white/[0.02] text-muted-foreground ring-white/10 hover:bg-white/[0.05] hover:text-foreground"
+                  }`}
+                >
+                  {t.label}
+                </a>
+              );
+            })}
+          </div>
+        ))}
+      </nav>
+
+      {/* Data */}
+      {/* General */}
+      <section id="general" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Clock className="size-4 text-violet-300" />
+            General
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            The time zone scheduled reports are sent in. &quot;9 AM&quot; means
+            9 AM here — on a Docker or cloud server the server&apos;s own clock is
+            usually UTC.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <TimeZoneForm
+            current={(await getSetting<string>("workspace.timezone")) ?? null}
+            serverZone={Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"}
+            zones={
+              typeof Intl.supportedValuesOf === "function"
+                ? Intl.supportedValuesOf("timeZone")
+                : []
+            }
+          />
+        </div>
+      </section>
+
+      <section id="claude-code" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Terminal className="size-4 text-violet-300" />
+            Claude Code on this computer
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Off by default. When it is on, the app starts <code>claude</code>, <code>gh</code> and{" "}
+            <code>git</code> on the machine that runs it, in the project folder you pick for a client,
+            under the operating-system account running the app and the GitHub login that account is
+            signed in with. Anyone who can sign in to this dashboard can then start them, so leave it
+            off on a server other people can reach. See docs/claude-code-tasks.md.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <HostAgentForm
+            enabled={hostAgentState().enabled}
+            forcedOff={hostAgentState().source === "env-off"}
+            fromEnv={hostAgentState().source === "env-on"}
+          />
+        </div>
+      </section>
+
+      <section id="data" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Database className="size-4 text-cyan-300" />
+            Data
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Your database is one file you can copy, back up, or move.
+          </p>
+        </header>
+        <div className="relative space-y-4 p-5">
+          <div className="grid gap-3 sm:grid-cols-4">
+            <Counter label="Clients" value={clientCount} accent="violet" />
+            <Counter label="Audits" value={auditCount} accent="cyan" />
+            <Counter label="Tasks" value={taskCount} accent="amber" />
+            <Counter label="Keywords" value={keywordCount} accent="emerald" />
+          </div>
+          <div className="rounded-xl border border-white/5 bg-black/20 p-4 font-mono text-xs">
+            <div className="text-muted-foreground">Database file</div>
+            <div className="mt-1 break-all text-foreground/90">{dbPath}</div>
+          </div>
+        </div>
+      </section>
+
+      {/* Brand */}
+      <section id="brand" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Palette className="size-4 text-fuchsia-300" />
+            Brand
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Used on PDF reports — your logo on the cover, your color for
+            headings and accents. Hides our branding entirely.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <BrandForm
+            initialName={brandName}
+            initialColor={brandColor}
+            initialLogoDataUrl={brandLogo}
+            initialTagline={brandTagline}
+            initialWebsite={brandWebsite}
+            initialEmail={brandEmail}
+            initialPhone={brandPhone}
+            initialFooterText={brandFooter}
+          />
+        </div>
+      </section>
+
+      {/* Google integration */}
+      <section id="google" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Plug className="size-4 text-violet-300" />
+            Google integration
+            {googleStatus.configured ? (
+              <span className="ml-1 inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
+                <CheckCircle2 className="size-3" />
+                Connected
+              </span>
+            ) : (
+              <span className="ml-1 inline-flex rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300 ring-1 ring-inset ring-amber-500/30">
+                Not connected
+              </span>
+            )}
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Connect once, use across every client. Unlocks real keyword data,
+            traffic charts, and quick-wins finder. Free, ~5 minutes to set up.
+          </p>
+        </header>
+        <div className="relative flex flex-wrap items-center justify-between gap-3 p-5">
+          <div className="space-y-0.5 text-sm">
+            {googleStatus.configured ? (
+              <>
+                <div className="font-medium">
+                  {googleStatus.email ?? "Connected"}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Pulling Search Console + Analytics data when you wire
+                  properties on each client.
+                </div>
+              </>
+            ) : googleStatus.credentialsSet ? (
+              <>
+                <div className="font-medium">Credentials saved</div>
+                <div className="text-xs text-muted-foreground">
+                  One step left — connect your Google account.
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-muted-foreground">
+                Step-by-step guide on the next page. Skippable — the rest of
+                the app works without it.
+              </div>
+            )}
+          </div>
+          <Link
+            href="/settings/google"
+            className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm transition-colors hover:bg-white/10"
+          >
+            {googleStatus.configured ? "Manage" : "Set up"}
+            <ArrowRight className="size-3.5" />
+          </Link>
+        </div>
+      </section>
+
+      {/* Team — accounts, roles, per-client access */}
+      <section
+        id="team"
+        className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md"
+      >
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Users2 className="size-4 text-violet-300" />
+            Team
+            {teamCount > 0 ? (
+              <span className="ml-1 inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
+                <CheckCircle2 className="size-3" />
+                {teamCount} {teamCount === 1 ? "person" : "people"}
+              </span>
+            ) : (
+              <span className="ml-1 inline-flex rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                Single password
+              </span>
+            )}
+          </h2>
+        </header>
+        <div className="flex items-center justify-between gap-4 px-5 py-4">
+          <p className="text-xs text-muted-foreground">
+            {teamCount > 0
+              ? "Everyone signs in as themselves. Assign clients so people only see the ones they work on."
+              : "Working with other people? Give each of them their own login, and assign who sees which clients."}
+          </p>
+          <Link
+            href="/settings/team"
+            className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm transition-colors hover:bg-white/10"
+          >
+            {teamCount > 0 ? "Manage" : "Set up"}
+            <ArrowRight className="size-3.5" />
+          </Link>
+        </div>
+      </section>
+
+      {/* Email / SMTP — for scheduled report delivery */}
+      <section id="email" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Mail className="size-4 text-cyan-300" />
+            Email delivery
+            {smtpHost ? (
+              <span className="ml-1 inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
+                <CheckCircle2 className="size-3" />
+                Configured
+              </span>
+            ) : (
+              <span className="ml-1 inline-flex rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300 ring-1 ring-inset ring-amber-500/30">
+                Not configured
+              </span>
+            )}
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            SMTP credentials for sending scheduled monthly reports straight to
+            clients. Bring your own — Gmail, Resend, SendGrid, or any SMTP host.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <SmtpForm
+            initial={{
+              host: smtpHost,
+              port: smtpPort,
+              user: smtpUser,
+              fromEmail: smtpFromEmail,
+              fromName: smtpFromName,
+              secure: smtpSecure,
+              hasPassword: smtpHasPassword,
+            }}
+          />
+        </div>
+      </section>
+
+      {/* Notifications */}
+      <section id="notify" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Bell className="size-4 text-fuchsia-300" />
+            Notifications
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Get pinged in Slack, Discord, or Teams when audits complete and
+            scores change. We auto-format the message for whichever service you
+            use.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <WebhookForm initialUrl={webhookUrl} />
+          <div className="mt-5 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+            <div className="rounded-lg border border-white/5 bg-black/20 p-3">
+              <div className="font-medium text-foreground">When triggered</div>
+              <div className="mt-1">
+                Audit completed, score dropped &ge;5 points, or audit failed.
+              </div>
+            </div>
+            <div className="rounded-lg border border-white/5 bg-black/20 p-3">
+              <div className="font-medium text-foreground">What we send</div>
+              <div className="mt-1">
+                Client name, score with delta, top issue, link back to the
+                audit.
+              </div>
+            </div>
+            <div className="rounded-lg border border-white/5 bg-black/20 p-3">
+              <div className="font-medium text-foreground">Where it goes</div>
+              <div className="mt-1">
+                Only the URL you paste. Nothing else, ever.
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Browser pool */}
+      <section id="browser" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Globe className="size-4 text-cyan-300" />
+            Headless browser pool
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Concurrency cap, stealth fingerprint, and optional outbound
+            proxies for SERP scraping, rank checks, GBP scraping, render +
+            screenshot, and local CWV measurement.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <BrowserForm initial={browserSettings} />
+        </div>
+      </section>
+
+      {/* Public API keys + inbound webhooks both gather under #api */}
+      <section id="api" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Key className="size-4 text-violet-300" />
+            Public API keys
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Bearer-token auth for{" "}
+            <code className="rounded bg-white/5 px-1 py-0.5">/api/v1/*</code>{" "}
+            endpoints. Use these in n8n, Make, Zapier, your own scripts.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <ApiKeyManager
+            initial={apiKeyRows.map((k) => ({
+              id: k.id,
+              name: k.name,
+              keyPrefix: k.keyPrefix,
+              scopes: k.scopes,
+              lastUsedAt: k.lastUsedAt,
+              createdAt: k.createdAt,
+              revokedAt: k.revokedAt,
+            }))}
+          />
+        </div>
+      </section>
+
+      {/* Inbound webhooks */}
+      <section className="relative overflow-hidden rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Plug className="size-4 text-cyan-300" />
+            Inbound webhooks
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Receive events from external systems — GitHub, Linear, Google
+            Alerts, custom integrations. Each webhook gets a unique URL +
+            stored event log you can replay or query.
+          </p>
+        </header>
+        <div className="relative p-5">
+          <InboundWebhooksManager initial={inboundWebhookRows} />
+        </div>
+      </section>
+
+      {/* AI provider keys — primary entry point for most users.
+          Kept a small amber glow because it's the highest-value section
+          and the only one where the visual cue earns its weight. */}
+      <section
+        id="ai"
+        className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-amber-500/20 bg-card/40 backdrop-blur-md"
+      >
+        <div className="pointer-events-none absolute -left-12 -top-12 size-40 rounded-full bg-amber-500/10 blur-3xl" />
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Key className="size-4 text-amber-300" />
+            AI connection
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Connect the AI subscription you already pay for, or a provider key
+            — either one drives the same tools. Most of the tool grid needs
+            neither.
+          </p>
+        </header>
+        <div className="relative space-y-5 p-5">
+          <ConnectionModePicker
+            mode={connectionMode}
+            status={aiStatus}
+            mcp={mcpStatus}
+            origin={appOrigin}
+            installPath={process.cwd()}
+            platform={process.platform}
+            nodePath={process.execPath}
+            mcpToolCount={MCP_TOOL_LIST.length}
+            mcpToolNames={MCP_TOOL_LIST.map((t) => t.name)}
+          />
+          {/* Keys stay reachable in every mode: someone on a subscription
+              still wants a key for the overnight jobs, and hiding it would
+              make that look impossible rather than optional. */}
+          {connectionMode === "mcp" ? (
+            <details className="group rounded-xl border border-white/10 bg-white/[0.02]">
+              <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium marker:content-none">
+                Also add an API key
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  optional — only needed for work that runs while you&apos;re away
+                </span>
+              </summary>
+              <div className="space-y-5 border-t border-white/5 p-4">
+                <ActiveProviderCard
+                  active={activeProvider}
+                  configured={configuredKeys}
+                  defaultModel={defaultModel}
+                />
+                <CreditSaverForm initial={creditSaverOn} />
+                <ApiKeysSection configured={configuredKeys} ollamaUrl={ollamaUrl} />
+              </div>
+            </details>
+          ) : (
+            <>
+              <ActiveProviderCard
+                active={activeProvider}
+                configured={configuredKeys}
+                defaultModel={defaultModel}
+              />
+              <CreditSaverForm initial={creditSaverOn} />
+              <ApiKeysSection configured={configuredKeys} ollamaUrl={ollamaUrl} />
+            </>
+          )}
+        </div>
+      </section>
+
+      {/* AI learning */}
+      <section id="ai-learning" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-white/5 bg-card/40 backdrop-blur-md">
+        <header className="relative border-b border-white/5 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <Brain className="size-4 text-violet-300" />
+            AI learning
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Watches what you correct in AI output and turns it into
+            durable style rules. The longer you use the tool, the better
+            its first-pass output gets — no model training needed.
+          </p>
+        </header>
+        <div className="relative flex flex-wrap items-center justify-between gap-3 p-5">
+          <p className="text-sm text-muted-foreground">
+            Review learned rules, manually disable any that are wrong,
+            and trigger the distill step on demand.
+          </p>
+          <Link
+            href="/settings/ai-learning"
+            className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm transition-colors hover:bg-white/10"
+          >
+            Open AI learning
+            <ArrowRight className="size-3.5" />
+          </Link>
+        </div>
+      </section>
+
+      {/* Privacy */}
+      <section id="privacy" className="relative overflow-hidden scroll-mt-24 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 backdrop-blur-md">
+        <header className="relative border-b border-emerald-500/20 px-5 py-4">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-emerald-300">
+            <Shield className="size-4" />
+            Privacy
+          </h2>
+        </header>
+        <div className="relative space-y-2 p-5 text-sm text-foreground/80">
+          <PrivacyLine>
+            <strong>No telemetry.</strong> This app does not phone home or send
+            usage data anywhere.
+          </PrivacyLine>
+          <PrivacyLine>
+            <strong>Your data stays here.</strong> Clients, audits, tasks,
+            keywords — all in one SQLite file on this machine.
+          </PrivacyLine>
+          <div className="rounded-md bg-white/[0.03] p-3 ring-1 ring-inset ring-white/5 text-xs">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+              Database file
+            </p>
+            <code className="text-xs break-all">{dbAbsolutePath}</code>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              Back this single file up to keep everything. Move it to a new
+              machine to migrate. Replaceable via the{" "}
+              <code>SEO_DB_PATH</code> env var.
+            </p>
+          </div>
+          <PrivacyLine>
+            <strong>Outbound requests are explicit.</strong> Tech detection,
+            audits, and keyword research fetch the URLs you tell us to. Nothing
+            else.
+          </PrivacyLine>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Counter({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent: "violet" | "cyan" | "amber" | "emerald";
+}) {
+  const tone = {
+    violet: "text-gradient-violet",
+    cyan: "text-gradient-cyan",
+    amber: "text-gradient-amber",
+    emerald: "text-gradient-emerald",
+  }[accent];
+  return (
+    <div className="rounded-xl border border-white/5 bg-black/20 px-4 py-3">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className={`mt-1 text-2xl font-semibold tracking-tight ${tone}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function PrivacyLine({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
+      <span>{children}</span>
+    </div>
+  );
+}

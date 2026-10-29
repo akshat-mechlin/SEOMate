@@ -1,0 +1,179 @@
+import type { Metadata, Viewport } from "next";
+import { isHostAgentEnabled } from "@/lib/host-agent";
+import { Inter, JetBrains_Mono } from "next/font/google";
+import { headers } from "next/headers";
+import { Sidebar } from "@/components/shell/sidebar";
+import { NeedsKeyBanner } from "@/components/shell/needs-key-banner";
+import { getAiAvailability } from "@/lib/ai-availability";
+import { TopBar } from "@/components/shell/top-bar";
+import { AIAssistant } from "@/components/shell/ai-assistant";
+import { PowerWidget } from "@/components/shell/power-widget";
+import { ClaudeDock } from "@/components/claude/claude-dock";
+import { FirstRunPrompt } from "@/components/shell/first-run-prompt";
+import { Toaster } from "@/components/shell/toaster";
+import { ConfirmDialogProvider } from "@/components/ui/confirm-dialog";
+import { ServiceWorkerRegister } from "@/components/shell/sw-register";
+import { ClientErrorCapture } from "@/components/shell/client-error-capture";
+import { QuickAddClientProvider } from "@/components/shell/quick-add-client-dialog";
+import { ShortcutsHelpHotkey } from "@/components/shell/shortcuts-help-hotkey";
+import { getUnreadCounts } from "@/lib/unread-counts";
+import { getUiMode } from "./settings/ui-actions";
+import { getThemePreference } from "./settings/theme-actions";
+import "./globals.css";
+
+// Inter is warmer + more readable at small sizes than Geist's precise grotesk.
+// Same web-safe quality; same variable-weight support.
+const sansFont = Inter({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+  display: "swap",
+});
+
+const monoFont = JetBrains_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+  display: "swap",
+});
+
+export const metadata: Metadata = {
+  title: "SEO Tool",
+  description: "Self-hosted SEO platform — free, modern, beginner-friendly.",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "SEO Tool",
+    statusBarStyle: "black-translucent",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#7c3aed",
+  width: "device-width",
+  initialScale: 1,
+};
+
+export default async function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  // Fetch unread counts so the sidebar can render badges next to sections
+  // with new content. Failure is non-fatal — empty counts = no badges.
+  let unreadByHref: Record<string, number> = {};
+  try {
+    const u = await getUnreadCounts();
+    unreadByHref = {
+      "/news": u.news,
+      "/agent": u.suggestions,
+      "/monitor": u.pageChanges,
+    };
+  } catch {
+    unreadByHref = {};
+  }
+
+  const uiMode = await getUiMode();
+
+  // Server-side embed detection. The proxy sees ?embed=1 in the
+  // request URL and forwards it as an x-embed header (see
+  // src/proxy.ts). When set, we render a minimal shell — no
+  // sidebar, no top-bar, no floating widgets — so the per-client tool
+  // drawer's iframe shows ONLY the tool content. No client script, no
+  // flash, no late hydration.
+  const isEmbed = (await headers()).get("x-embed") === "1";
+
+  // Theme. `dark` used to be hardcoded here, which made the whole app
+  // dark-only with no toggle and no way to follow the OS preference —
+  // awkward in a bright office, and worse on the client-facing portal.
+  //
+  // "system" can only be resolved in the browser, so the class is
+  // applied by the inline script below before first paint. Explicit
+  // light/dark is resolved here on the server, which avoids the flash
+  // entirely for users who have chosen one.
+  const theme = await getThemePreference();
+
+  // Read once here rather than in each page that needs a model. Failure
+  // is non-fatal: no banner is better than a broken shell.
+  const aiAvailability = await getAiAvailability().catch(() => ({
+    available: false,
+    hasKey: false,
+    hasSubscription: false,
+    client: null,
+  }));
+
+  return (
+    <html
+      lang="en"
+      suppressHydrationWarning
+      data-ui-mode={uiMode}
+      data-theme={theme}
+      data-embed={isEmbed ? "1" : undefined}
+      className={`${theme === "dark" ? "dark" : ""} ${sansFont.variable} ${monoFont.variable} h-full antialiased`}
+    >
+      <head>
+        {/*
+          Runs before first paint, so a "system" user never sees a
+          white flash before the dark class lands (or vice versa).
+          Deliberately tiny and dependency-free — it blocks rendering.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=document.documentElement.dataset.theme;if(t==="system"){var d=window.matchMedia("(prefers-color-scheme: dark)").matches;document.documentElement.classList.toggle("dark",d);}}catch(e){}})();`,
+          }}
+        />
+      </head>
+      {/*
+        Extensions (Endtest, Grammarly, and similar) inject attributes
+        on <body> before hydration. suppressHydrationWarning applies
+        only to this element, so real mismatches in children still surface.
+      */}
+      <body
+        className="h-screen overflow-hidden bg-background text-foreground"
+        suppressHydrationWarning
+      >
+        <ConfirmDialogProvider>
+          <QuickAddClientProvider>
+            {isEmbed ? (
+              // Minimal embedded shell — just the page content. The
+              // host (drawer) owns the chrome.
+              <main className="h-full overflow-y-auto p-4 md:p-6">
+                {children}
+              </main>
+            ) : (
+              <>
+                <div className="flex h-full">
+                  <Sidebar
+                    unreadByHref={unreadByHref}
+                    uiMode={uiMode}
+                    hasAiKey={aiAvailability.hasKey}
+                  />
+                  <div className="flex h-full min-w-0 flex-1 flex-col">
+                    <TopBar unreadByHref={unreadByHref} theme={theme} />
+                    <main className="flex-1 overflow-y-auto p-4 md:p-6">
+                      {/* One place, so all 38 AI pages say the same thing
+                          — and /agent, /blog and the assistant too, not
+                          only /tools/*. */}
+                      <NeedsKeyBanner
+                        hasKey={aiAvailability.hasKey}
+                        hasSubscription={aiAvailability.hasSubscription}
+                        client={aiAvailability.client}
+                      />
+                      {children}
+                    </main>
+                  </div>
+                </div>
+                <AIAssistant />
+                <PowerWidget />
+                {isHostAgentEnabled() && <ClaudeDock />}
+                <FirstRunPrompt />
+              </>
+            )}
+            <Toaster />
+            <ServiceWorkerRegister />
+            <ClientErrorCapture />
+            <ShortcutsHelpHotkey />
+          </QuickAddClientProvider>
+        </ConfirmDialogProvider>
+      </body>
+    </html>
+  );
+}
