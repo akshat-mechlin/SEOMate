@@ -1,0 +1,168 @@
+import { NextRequest, NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
+import {
+  exchangeCodeForTokens,
+  fetchGoogleUserEmail,
+  getGoogleClientCredentials,
+  resolveRedirectUri,
+} from "@/lib/google-oauth";
+import { setSetting } from "@/lib/settings-store";
+import { encrypt } from "@/lib/crypto";
+import { logActivity } from "@/lib/activity";
+import { db } from "@/db/client";
+import { clients } from "@/db/schema";
+
+export const dynamic = "force-dynamic";
+
+export async function GET(req: NextRequest) {
+  const code = req.nextUrl.searchParams.get("code");
+  const error = req.nextUrl.searchParams.get("error");
+  const state = req.nextUrl.searchParams.get("state") ?? "";
+  const isPopup = state.includes("popup");
+  const clientIdMatch = state.match(/clientId:(\d+)/);
+  const targetClientId = clientIdMatch ? Number(clientIdMatch[1]) : null;
+
+  const settingsUrl = new URL("/settings/google", req.nextUrl.origin);
+
+  function popupResponse(payload: {
+    ok: boolean;
+    email?: string | null;
+    error?: string;
+  }) {
+    // Render a tiny HTML page that postMessages the parent and closes itself.
+    const safe = JSON.stringify(payload).replace(/</g, "\\u003c");
+    return new NextResponse(
+      `<!doctype html><html><head><meta charset="utf-8"><title>Google ${
+        payload.ok ? "connected" : "connection failed"
+      }</title></head><body style="background:#0c0d12;color:#fff;font-family:system-ui,sans-serif;padding:24px;text-align:center"><p>${
+        payload.ok
+          ? "Connected. You can close this window."
+          : "Connection failed: " + (payload.error ?? "unknown")
+      }</p><script>(function(){try{if(window.opener){window.opener.postMessage(${safe},"*");}}catch(e){}setTimeout(function(){window.close();},400);})();</script></body></html>`,
+      { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+    );
+  }
+
+  if (error) {
+    if (isPopup) return popupResponse({ ok: false, error });
+    settingsUrl.searchParams.set("error", error);
+    return NextResponse.redirect(settingsUrl);
+  }
+  if (!code) {
+    if (isPopup) return popupResponse({ ok: false, error: "missing-code" });
+    settingsUrl.searchParams.set("error", "missing-code");
+    return NextResponse.redirect(settingsUrl);
+  }
+
+  const creds = await getGoogleClientCredentials();
+  if (!creds) {
+    if (isPopup) return popupResponse({ ok: false, error: "no-credentials" });
+    settingsUrl.searchParams.set("error", "no-credentials");
+    return NextResponse.redirect(settingsUrl);
+  }
+
+  // MUST match the URI sent in the auth-init route AND shown to the
+  // user on /settings/google. Uses x-forwarded-* headers when present
+  // so behind-proxy installs work.
+  const redirectUri = resolveRedirectUri(req);
+
+  let tokens;
+  try {
+    tokens = await exchangeCodeForTokens({
+      code,
+      clientId: creds.clientId,
+      clientSecret: creds.clientSecret,
+      redirectUri,
+    });
+  } catch (err) {
+    const msg = `exchange-failed: ${(err as Error).message}`;
+    if (isPopup) return popupResponse({ ok: false, error: msg });
+    settingsUrl.searchParams.set("error", msg);
+    return NextResponse.redirect(settingsUrl);
+  }
+
+  if (!tokens.refresh_token) {
+    const msg =
+      "no-refresh-token: revoke this app's access at https://myaccount.google.com/permissions and try again";
+    if (isPopup) return popupResponse({ ok: false, error: msg });
+    settingsUrl.searchParams.set("error", msg);
+    return NextResponse.redirect(settingsUrl);
+  }
+
+  // Google Ads has its own sign-in: keep its token apart from the Search
+  // Console one, and leave that connection as it was.
+  if (state.split("|").includes("ads")) {
+    await setSetting("google_ads.refresh_token", encrypt(tokens.refresh_token));
+    await logActivity({
+      kind: "google.connected",
+      message: "Connected Google Ads (Keyword Planner).",
+      level: "success",
+    });
+    if (isPopup) return popupResponse({ ok: true, email: null });
+    settingsUrl.searchParams.set("ads", "connected");
+    return NextResponse.redirect(settingsUrl);
+  }
+
+  const expiresAt = Date.now() + tokens.expires_in * 1000;
+
+  // Best-effort email lookup so we can show "Connected as foo@gmail.com"
+  let email: string | null = null;
+  try {
+    email = await fetchGoogleUserEmail(tokens.access_token);
+  } catch {
+    // ignore
+  }
+
+  if (targetClientId) {
+    // Persist tokens against this specific client (per-client OAuth).
+    // Tokens encrypted at rest — see lib/crypto.ts.
+    await db
+      .update(clients)
+      .set({
+        googleRefreshToken: encrypt(tokens.refresh_token),
+        googleAccessToken: encrypt(tokens.access_token),
+        googleAccessTokenExpiresAt: expiresAt,
+        googleConnectedEmail: email,
+      })
+      .where(eq(clients.id, targetClientId));
+
+    await logActivity({
+      kind: "google.connected",
+      message: `Connected per-client Google account${email ? ` (${email})` : ""} for client #${targetClientId}.`,
+      level: "success",
+      clientId: targetClientId,
+    });
+
+    if (isPopup) return popupResponse({ ok: true, email });
+    return NextResponse.redirect(
+      new URL(`/clients/${targetClientId}?google-connected=1`, req.nextUrl.origin),
+    );
+  }
+
+  // Workspace-wide tokens — encrypted at rest. See lib/crypto.ts.
+  await Promise.all([
+    setSetting("google.refresh_token", encrypt(tokens.refresh_token)),
+    setSetting("google.access_token", encrypt(tokens.access_token)),
+    setSetting("google.access_token_expires_at", expiresAt),
+  ]);
+  if (email) await setSetting("google.connected_email", email);
+
+  // Refresh the gmail-scope cache so the outreach banner disappears
+  // immediately if the user just granted the gmail.readonly scope.
+  try {
+    const { refreshGmailScopeCache } = await import("@/lib/gmail-scope");
+    await refreshGmailScopeCache();
+  } catch {
+    // ignore — banner will refresh on its own 12h cache cycle
+  }
+
+  await logActivity({
+    kind: "google.connected",
+    message: `Connected Google account${email ? ` (${email})` : ""} for GSC + GA4 access.`,
+    level: "success",
+  });
+
+  if (isPopup) return popupResponse({ ok: true, email });
+  settingsUrl.searchParams.set("connected", "1");
+  return NextResponse.redirect(settingsUrl);
+}
