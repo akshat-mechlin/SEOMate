@@ -1,0 +1,563 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useState } from "react";
+import { motion, LayoutGroup } from "motion/react";
+import { Search, PanelLeftClose, PanelLeftOpen, ChevronDown, ChevronRight } from "lucide-react";
+import { NAV_GROUPS, type NavGroup, type NavItem } from "./nav-items";
+import { ToolDot, ToolDotLegend } from "@/components/tool-dot";
+import { useStoredState } from "@/components/use-stored-state";
+
+/** Alias kept so the render code below reads unchanged. */
+const groups = NAV_GROUPS;
+
+/**
+ * Per-group accent. Pre-baked Tailwind class strings so the JIT picks
+ * them up — dynamic `text-${color}-300` would silently break.
+ *
+ * `icon` is the text color applied to each item's lucide icon.
+ * `iconActive` is the brighter shade used on the currently-active row.
+ * `dot` is the small marker shown beside a collapsed-group header when
+ * that group contains the active page.
+ * `borderLeft` is the 2px left-edge accent shown on the open-group
+ * container so the cluster reads as "you are inside this section".
+ */
+type GroupAccent = {
+  icon: string;
+  iconActive: string;
+  dot: string;
+  borderLeft: string;
+  openBg: string;
+};
+
+const NEUTRAL_ACCENT: GroupAccent = {
+  icon: "text-sidebar-foreground/55",
+  iconActive: "text-sidebar-accent-foreground",
+  dot: "bg-primary",
+  borderLeft: "border-l-2 border-l-primary/40",
+  openBg: "bg-sidebar-accent/30",
+};
+
+const GROUP_ACCENTS: Record<string, GroupAccent> = {
+  essentials: {
+    icon: "text-violet-300/70",
+    iconActive: "text-violet-200",
+    dot: "bg-violet-400",
+    borderLeft: "border-l-2 border-l-violet-500/40",
+    openBg: "bg-violet-500/[0.08]",
+  },
+  everyday: {
+    icon: "text-cyan-300/70",
+    iconActive: "text-cyan-200",
+    dot: "bg-cyan-400",
+    borderLeft: "border-l-2 border-l-cyan-500/40",
+    openBg: "bg-cyan-500/[0.08]",
+  },
+  content: {
+    icon: "text-violet-300/70",
+    iconActive: "text-violet-200",
+    dot: "bg-violet-400",
+    borderLeft: "border-l-2 border-l-violet-500/40",
+    openBg: "bg-violet-500/[0.06]",
+  },
+  keywords: {
+    icon: "text-cyan-300/70",
+    iconActive: "text-cyan-200",
+    dot: "bg-cyan-400",
+    borderLeft: "border-l-2 border-l-cyan-500/40",
+    openBg: "bg-cyan-500/[0.06]",
+  },
+  "paid-ads": {
+    icon: "text-rose-300/70",
+    iconActive: "text-rose-200",
+    dot: "bg-rose-400",
+    borderLeft: "border-l-2 border-l-rose-500/40",
+    openBg: "bg-rose-500/[0.06]",
+  },
+  backlinks: {
+    icon: "text-emerald-300/70",
+    iconActive: "text-emerald-200",
+    dot: "bg-emerald-400",
+    borderLeft: "border-l-2 border-l-emerald-500/40",
+    openBg: "bg-emerald-500/[0.06]",
+  },
+  local: {
+    icon: "text-amber-300/70",
+    iconActive: "text-amber-200",
+    dot: "bg-amber-400",
+    borderLeft: "border-l-2 border-l-amber-500/40",
+    openBg: "bg-amber-500/[0.06]",
+  },
+  competitors: {
+    icon: "text-cyan-300/70",
+    iconActive: "text-cyan-200",
+    dot: "bg-cyan-400",
+    borderLeft: "border-l-2 border-l-cyan-500/40",
+    openBg: "bg-cyan-500/[0.06]",
+  },
+  "ai-visibility": {
+    icon: "text-fuchsia-300/70",
+    iconActive: "text-fuchsia-200",
+    dot: "bg-fuchsia-400",
+    borderLeft: "border-l-2 border-l-fuchsia-500/40",
+    openBg: "bg-fuchsia-500/[0.06]",
+  },
+  monitoring: {
+    icon: "text-amber-300/70",
+    iconActive: "text-amber-200",
+    dot: "bg-amber-400",
+    borderLeft: "border-l-2 border-l-amber-500/40",
+    openBg: "bg-amber-500/[0.06]",
+  },
+  imports: {
+    icon: "text-emerald-300/70",
+    iconActive: "text-emerald-200",
+    dot: "bg-emerald-400",
+    borderLeft: "border-l-2 border-l-emerald-500/40",
+    openBg: "bg-emerald-500/[0.06]",
+  },
+  deliverables: {
+    icon: "text-cyan-300/70",
+    iconActive: "text-cyan-200",
+    dot: "bg-cyan-400",
+    borderLeft: "border-l-2 border-l-cyan-500/40",
+    openBg: "bg-cyan-500/[0.06]",
+  },
+  account: NEUTRAL_ACCENT,
+};
+
+
+const COLLAPSED_KEY = "seo:sidebar-collapsed";
+/** Stable identity — useSyncExternalStore needs a referentially stable fallback. */
+const EMPTY_GROUPS: Record<string, boolean> = {};
+const parseCollapsed = (raw: string) => raw === "1";
+const parseOpenGroups = (raw: string) =>
+  JSON.parse(raw) as Record<string, boolean>;
+const OPEN_GROUPS_KEY = "seo:sidebar-open-groups";
+
+function isActive(pathname: string, href: string) {
+  if (href === "/") return pathname === "/";
+  return pathname === href || pathname.startsWith(href + "/");
+}
+
+export function Sidebar({
+  unreadByHref,
+  uiMode = "guided",
+  hasAiKey = false,
+}: {
+  unreadByHref?: Record<string, number>;
+  /**
+   * Whether an AI key is configured. Decides if the amber "needs a key"
+   * dot is worth showing — once a key exists nothing is blocked, so the
+   * dot would only be noise.
+   */
+  hasAiKey?: boolean;
+  /**
+   * "guided" (default for new users): filters nav to only items marked
+   * `guided: true`. Empty groups collapse out of view. ~15 items total
+   * across ~7 groups.
+   * "pro": shows everything (the historical sidebar).
+   */
+  uiMode?: "guided" | "pro";
+} = {}) {
+  const pathname = usePathname();
+  // Both read from localStorage via useSyncExternalStore rather than
+  // useState + a hydrate effect. The old version rendered the server
+  // default, committed it to the DOM, then corrected itself — so a user
+  // who kept the sidebar collapsed watched it flash open and snap shut
+  // on every single page load.
+  const [collapsed, setCollapsedStored] = useStoredState<boolean>(
+    COLLAPSED_KEY,
+    false,
+    parseCollapsed,
+  );
+  const [storedOpenGroups, setStoredOpenGroups] = useStoredState<
+    Record<string, boolean>
+  >(OPEN_GROUPS_KEY, EMPTY_GROUPS, parseOpenGroups);
+  // Groups auto-opened because they contain the current route, layered
+  // over the stored preference. Kept separate so navigating somewhere
+  // doesn't silently rewrite what the user chose to leave collapsed.
+  const [routeOpened, setRouteOpened] = useState<Record<string, boolean>>({});
+  const openGroups = { ...storedOpenGroups, ...routeOpened };
+  const unread = unreadByHref ?? {};
+
+  // Apply the guided/pro filter. In guided mode every item must opt-in
+  // via `guided: true`. Pinned groups stay visible even after filtering
+  // (Essentials + Account) so the rail always has anchors at top + bottom;
+  // non-pinned groups with no surviving items are hidden entirely.
+  const visibleGroups: NavGroup[] =
+    uiMode === "pro"
+      ? groups
+      : groups
+          .map((g) => ({
+            ...g,
+            items: g.items.filter((it: NavItem) => it.guided),
+          }))
+          .filter((g) => g.pinned || g.items.length > 0);
+
+  // Auto-open the group containing the current route — even if the user
+  // had it collapsed — so navigation context is always visible. We
+  // iterate the FULL groups list (not visibleGroups) because the active
+  // route may live in a hidden-by-guided-mode group and we still want
+  // to surface it when the user lands there via direct URL.
+  // Derived during render rather than in an effect: which group holds
+  // the current route is a pure function of `pathname`, so computing it
+  // here saves the extra commit the effect version cost on every
+  // navigation. React restarts the render before touching the DOM.
+  const activeGroupId = groups.find((g) =>
+    g.items.some((it: NavItem) => isActive(pathname, it.href)),
+  )?.id;
+  if (activeGroupId && !routeOpened[activeGroupId]) {
+    setRouteOpened((prev) => ({ ...prev, [activeGroupId]: true }));
+  }
+
+  function toggle() {
+    setCollapsedStored(!collapsed, (v) => (v ? "1" : "0"));
+  }
+
+  function toggleGroup(id: string) {
+    setStoredOpenGroups({ ...openGroups, [id]: !openGroups[id] }, JSON.stringify);
+    // Closing a route-opened group must clear the route override too,
+    // or the merge above would immediately re-open it.
+    setRouteOpened((prev) => {
+      if (!prev[id]) return prev;
+      const copy = { ...prev };
+      delete copy[id];
+      return copy;
+    });
+  }
+
+  // Trigger the global SearchPalette via its keyboard shortcut. The palette
+  // listens for cmd/ctrl+K; we simulate the keypress so we don't have to
+  // wire a context.
+  function openSearch() {
+    const evt = new KeyboardEvent("keydown", {
+      key: "k",
+      metaKey: true,
+      ctrlKey: true,
+      bubbles: true,
+    });
+    document.dispatchEvent(evt);
+  }
+
+  return (
+    <aside
+      className={`hidden shrink-0 border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-[width] duration-150 ease-out md:flex md:flex-col ${
+        collapsed ? "w-[60px]" : "w-[260px]"
+      }`}
+    >
+      {/* Workspace header — shadcn-admin style: rounded primary mark
+          + app name + role/version line beneath + collapse toggle */}
+      <div
+        className={`flex h-14 shrink-0 items-center gap-2 border-b border-sidebar-border ${
+          collapsed ? "justify-center px-2" : "px-3"
+        }`}
+      >
+        <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary text-sm font-semibold text-primary-foreground">
+          S
+        </div>
+        {!collapsed && (
+          <>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold leading-none text-sidebar-foreground">
+                SEO Tool
+              </div>
+              <div className="mt-1 truncate text-xs text-sidebar-foreground/60">
+                v0.2 · local
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={toggle}
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+              className="grid size-7 place-items-center rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            >
+              <PanelLeftClose className="size-4" />
+            </button>
+          </>
+        )}
+      </div>
+
+      {collapsed && (
+        <div className="flex justify-center py-2">
+          <button
+            type="button"
+            onClick={toggle}
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+            className="grid size-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <PanelLeftOpen className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Top-bar already owns the global search (cmd+K). When the
+          sidebar is collapsed we still expose a tiny search affordance
+          here so users in compact mode can launch the palette without
+          expanding the sidebar first. */}
+      {collapsed && (
+        <div className="flex justify-center py-2">
+          <button
+            type="button"
+            onClick={openSearch}
+            title="Search (⌘K)"
+            aria-label="Search"
+            className="grid size-9 place-items-center rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+          >
+            <Search className="size-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Nav */}
+      <LayoutGroup id="sidebar-nav">
+      <nav
+        className={`flex-1 overflow-y-auto pb-3 ${
+          collapsed ? "px-1.5" : "px-2"
+        }`}
+      >
+        {visibleGroups.map((group) => {
+          const isOpen =
+            group.pinned ||
+            (openGroups[group.id] ?? group.defaultOpen ?? false);
+          // Group "contains the current page" — used to give the
+          // collapsed group header a subtle active indicator so the
+          // user can still see which section they're in without
+          // expanding it.
+          const hasActiveChild = group.items.some((it) =>
+            isActive(pathname, it.href),
+          );
+          const accent = GROUP_ACCENTS[group.id] ?? NEUTRAL_ACCENT;
+          return (
+            <div
+              key={group.id}
+              className={`mt-1.5 first:mt-0 ${
+                isOpen && !collapsed && !group.pinned
+                  ? `rounded-md pb-1 ${accent.openBg} ${accent.borderLeft}`
+                  : ""
+              }`}
+            >
+              {!collapsed && !group.pinned && (
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(group.id)}
+                  className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-[13px] font-semibold tracking-tight transition-colors ${
+                    isOpen
+                      ? "text-sidebar-foreground"
+                      : hasActiveChild
+                        ? "text-sidebar-foreground/85 hover:text-sidebar-foreground"
+                        : "text-sidebar-foreground/70 hover:text-sidebar-foreground"
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    {/* Tiny dot when a group has the current page but
+                        is collapsed — surfaces "you're in here" without
+                        expanding the group. Color-keyed to the group
+                        so the user gets a quick "section identity" read. */}
+                    {hasActiveChild && !isOpen && (
+                      <span
+                        className={`size-1.5 shrink-0 rounded-full ${accent.dot}`}
+                      />
+                    )}
+                    {group.title}
+                  </span>
+                  {isOpen ? (
+                    <ChevronDown className="size-3.5 opacity-60" />
+                  ) : (
+                    <ChevronRight className="size-3.5 opacity-60" />
+                  )}
+                </button>
+              )}
+              {!collapsed && group.pinned && (
+                <div className="px-2 py-1.5 text-[13px] font-semibold tracking-tight text-sidebar-foreground/75">
+                  {group.title}
+                </div>
+              )}
+              {collapsed && (
+                <div
+                  aria-hidden
+                  className="mx-auto my-2 h-px w-5 bg-sidebar-border"
+                />
+              )}
+              {(isOpen || collapsed) && (
+                <ul className="mt-0.5">
+                  {group.items.map(({ href, label, icon: Icon, external }: NavItem) => {
+                    // An external entry is never "the current page", and
+                    // opening it in this tab would navigate away from the
+                    // app entirely.
+                    const active = external ? false : isActive(pathname, href);
+                    return (
+                      <li key={href}>
+                        <Link
+                          href={href}
+                          {...(external
+                            ? { target: "_blank", rel: "noreferrer noopener" }
+                            : {})}
+                          title={collapsed ? label : undefined}
+                          aria-label={collapsed ? label : undefined}
+                          className={
+                            collapsed
+                              ? `relative flex h-9 items-center justify-center rounded-md ${
+                                  active
+                                    ? "text-sidebar-accent-foreground"
+                                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+                                }`
+                              : active
+                                ? "relative flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-accent-foreground"
+                                : "relative flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+                          }
+                        >
+                          {/* Active background pill — animates between
+                              rows via shared layoutId so it slides
+                              smoothly when navigation changes. */}
+                          {active && (
+                            <motion.span
+                              layoutId="sidebar-active-pill"
+                              className="absolute inset-0 rounded-md bg-sidebar-accent"
+                              transition={{
+                                type: "spring",
+                                stiffness: 380,
+                                damping: 30,
+                              }}
+                            />
+                          )}
+                          {/* Icon tinted by parent group accent —
+                              active rows brighten to the accent's
+                              "200" shade. Gives each section its own
+                              visual identity without changing the row
+                              chrome. */}
+                          <Icon
+                            className={`relative z-10 shrink-0 size-3.5 transition-colors ${
+                              active ? accent.iconActive : accent.icon
+                            }`}
+                          />
+                          {!collapsed && (
+                            <span className="relative z-10 flex-1 truncate">
+                              {label}
+                            </span>
+                          )}
+                          {/* One dot, one rule — lib/tool-readiness.ts,
+                              shared with the per-client rail and the
+                              launcher cards. It renders nothing when the
+                              answer is genuinely unknown, which is the
+                              case for composed hub pages the import-graph
+                              derivation over-flags: /audits comes back
+                              "needs AI" only because it embeds an
+                              add-client dialog, and an amber dot there
+                              would call a working page broken. */}
+                          {!collapsed && !unread[href] && (
+                            <ToolDot
+                              href={href}
+                              hasAiKey={hasAiKey}
+                              className="relative z-10 ml-auto"
+                            />
+                          )}
+                          {unread[href] && unread[href] > 0 ? (
+                            collapsed ? (
+                              <span
+                                aria-label={`${unread[href]} new`}
+                                className="absolute right-1 top-1 z-10 size-1.5 rounded-full bg-rose-500"
+                              />
+                            ) : (
+                              <span className="relative z-10 ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded bg-rose-500/15 px-1 text-[10px] font-medium text-rose-300">
+                                {unread[href] > 9 ? "9+" : unread[href]}
+                              </span>
+                            )
+                          ) : null}
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })}
+      </nav>
+      </LayoutGroup>
+
+      {/* What the dots mean. They were shipped without a key twice and
+          reported unreadable both times; a color with no legend is a
+          puzzle, and the dot exists to save a click, not add one.
+          Hidden when the rail is collapsed — there is no room, and no
+          dots are drawn there either. */}
+      {!collapsed && (
+        <ToolDotLegend className="border-t border-sidebar-border px-3 py-2" />
+      )}
+
+      {/* User block + live status — shadcn-admin pattern */}
+      <div className="border-t border-sidebar-border">
+        {/* User block */}
+        <Link
+          href="/settings"
+          title={collapsed ? "Account · Settings" : undefined}
+          className={`flex items-center gap-2 transition-colors hover:bg-sidebar-accent ${
+            collapsed ? "h-12 justify-center" : "h-14 px-3"
+          }`}
+        >
+          <div className="grid size-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 text-xs font-semibold text-white">
+            SE
+          </div>
+          {!collapsed && (
+            <>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium leading-none text-sidebar-foreground">
+                  Local user
+                </div>
+                <div className="mt-1 truncate text-xs text-sidebar-foreground/60">
+                  Single-user mode
+                </div>
+              </div>
+              <ChevronRight className="size-4 text-sidebar-foreground/40" />
+            </>
+          )}
+        </Link>
+        {/* Guided/Pro mode toggle. In guided mode the rail is filtered
+            down to ~15 essentials; switching to pro reveals all 80+
+            entries. Persisted via the ui.mode workspace setting so the
+            choice survives reloads. */}
+        {!collapsed && (
+          <form
+            action="/api/ui-mode/toggle"
+            method="POST"
+            className="border-t border-sidebar-border px-3 py-2"
+          >
+            <button
+              type="submit"
+              className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-xs text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
+              title={
+                uiMode === "guided"
+                  ? "Reveal every tool in the sidebar"
+                  : "Hide advanced tools — keep the essentials only"
+              }
+            >
+              <span className="inline-flex items-center gap-2">
+                {uiMode === "guided" ? (
+                  <PanelLeftOpen className="size-3.5" />
+                ) : (
+                  <PanelLeftClose className="size-3.5" />
+                )}
+                <span>{uiMode === "guided" ? "Show all tools" : "Guided mode"}</span>
+              </span>
+              <span className="rounded bg-sidebar-accent/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sidebar-foreground/80">
+                {uiMode === "guided" ? "Pro" : "Easy"}
+              </span>
+            </button>
+          </form>
+        )}
+        {/* Live status pill */}
+        <div
+          className={`flex items-center gap-2 border-t border-sidebar-border py-2 text-xs text-sidebar-foreground/60 ${
+            collapsed ? "justify-center px-2" : "px-3"
+          }`}
+        >
+          <span className="size-1.5 rounded-full bg-emerald-400" />
+          {!collapsed && <span>Local · everything on this machine</span>}
+        </div>
+      </div>
+    </aside>
+  );
+}

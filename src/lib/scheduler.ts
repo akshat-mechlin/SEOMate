@@ -1,0 +1,460 @@
+/**
+ * In-process scheduler for the background runners.
+ *
+ * Before this, all six runners hung off a single line in the dashboard
+ * page component:
+ *
+ *     try { tickDailyAgent().catch(() => {}); } catch {}
+ *
+ * which meant nothing ran unless a human loaded `/`. Go on holiday and
+ * rank checks, page monitoring, alerting, scheduled reports and the
+ * weekly digest all silently stopped — while the queue UI kept telling
+ * users "publishes on the next daily-agent tick (≤24h)". For a product
+ * sold to agencies on automation, the automation was a side effect of
+ * someone opening a browser tab.
+ *
+ * This is a long-lived Node server (`next start` / the Docker CMD), so
+ * a plain interval is the right tool — no external cron, no extra
+ * service, still works on the $5 VPS the project targets. The dashboard
+ * still nudges the scheduler on load, which covers the case where the
+ * process was asleep or just restarted.
+ *
+ * Two properties the old approach lacked:
+ *
+ *   1. **Crash-safe claiming.** tickDailyAgent wrote its `last_run`
+ *      BEFORE doing the work, so a process that died mid-run skipped
+ *      the entire batch for 24h with no record. Runners here record
+ *      started/finished separately, so an interrupted run is visible
+ *      and retried rather than silently swallowed.
+ *   2. **Per-runner isolation.** One runner throwing can't stop the
+ *      others, and each records its own last-success timestamp.
+ */
+
+import { getSetting, setSetting } from "./settings-store";
+// Static, unlike the runners themselves: it is a pure string function
+// with no database or tool imports behind it.
+import { summariseSweep } from "./sweep-summary";
+import { summariseGbp } from "./gbp-summary";
+
+type Runner = {
+  id: string;
+  label: string;
+  /** How often to attempt this runner. */
+  everyMs: number;
+  run: () => Promise<unknown>;
+  /**
+   * One line about what the last run actually did, for the Automations
+   * screen.
+   *
+   * A runner that finishes without throwing currently reads as "ran
+   * fine", and for several of these that is not the same thing. The tool
+   * sweep can finish having reached nothing at all — which it did, for
+   * months, while reporting every check as ok. "Last run: 2 of 10 checks
+   * ran" is the difference between automation you can trust and
+   * automation you assume is working.
+   *
+   * Returning null means there is nothing worth saying, which is the
+   * right answer for most runs of most runners.
+   */
+  summarise?: (result: unknown) => string | null;
+  /**
+   * How long a started-but-unfinished run counts as still running before
+   * it may be retried. Defaults to STALE_RUN_MS; the crawling and
+   * rank-checking runners legitimately take longer than that, and a
+   * second replica would otherwise start a duplicate mid-run.
+   */
+  staleMs?: number;
+};
+
+/**
+ * How often the scheduler wakes up. Individual runners decide whether
+ * they're actually due; this is just the granularity.
+ */
+const TICK_MS = 60_000;
+
+/**
+ * A run that started but never recorded a finish is considered dead
+ * after this long, and may be retried. Long enough for the heaviest
+ * legitimate run (a Monday rank sweep across hundreds of keywords),
+ * short enough that a crash doesn't cost a whole day.
+ */
+const STALE_RUN_MS = 30 * 60_000;
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+
+function runners(): Runner[] {
+  return [
+    {
+      id: "daily_agent",
+      label: "Daily agent",
+      everyMs: 24 * HOUR,
+      staleMs: 3 * HOUR,
+      run: async () => (await import("./daily-agent")).tickDailyAgent(),
+    },
+    {
+      // The autonomous loop: plan work per client, apply what the user's
+      // autonomy level permits, queue the rest, and turn everything it
+      // can't touch into tasks.
+      //
+      // Separate from `daily_agent`, which refreshes inputs (audits, RSS,
+      // suggestions). This one acts on them. Keeping them apart means a
+      // slow crawl can't delay the acting, and a user who turns autonomy
+      // off still gets fresh data.
+      //
+      // Every 6h rather than daily so a fix queued in the morning isn't
+      // sitting untouched until tomorrow. The per-run and per-day caps in
+      // agent settings — not this interval — are what bound how much it
+      // changes.
+      id: "autonomous_agent",
+      label: "Autonomous agent",
+      everyMs: 6 * HOUR,
+      run: async () => (await import("./agent/run")).runAgentForAllClients(),
+    },
+    {
+      // Per-client automations (blog / GBP / social drafts, auto-publish).
+      //
+      // These used to run only as a step of `daily_agent`, which fires once
+      // per 24h at whatever time the app happened to start. A schedule set
+      // for 09:00 UTC was skipped whenever the sweep ran earlier in the
+      // day, and the next sweep came a full day later, so it ran every
+      // other day or never. Checking every 15 minutes makes the schedule's
+      // own run time the thing that decides.
+      id: "content_schedules",
+      label: "Content schedules",
+      everyMs: 15 * MINUTE,
+      run: async () => {
+        const { tickScheduleGeneration, tickQueuePublish } = await import(
+          "./daily-automations"
+        );
+        const gen = await tickScheduleGeneration();
+        const pub = await tickQueuePublish();
+        return { ...gen, ...pub };
+      },
+      summarise: (r) => {
+        const x = r as {
+          generated?: number;
+          skipped?: number;
+          published?: number;
+          failed?: number;
+        } | null;
+        if (!x || (!x.generated && !x.skipped && !x.published && !x.failed)) {
+          return null;
+        }
+        return `${x.generated ?? 0} generated, ${x.published ?? 0} published, ${x.failed ?? 0} failed`;
+      },
+    },
+    {
+      id: "schedule_runner",
+      label: "Scheduled reports",
+      everyMs: 15 * MINUTE,
+      run: async () => (await import("./report-mailer")).tickScheduleRunner(),
+      summarise: (r) => {
+        const s = r as { fired?: number; errors?: string[] } | null;
+        if (!s) return null;
+        const failed = s.errors?.length ?? 0;
+        if (!s.fired && !failed) return null;
+        return failed
+          ? `${s.fired ?? 0} sent, ${failed} failed — see the activity log`
+          : `${s.fired} sent`;
+      },
+    },
+    {
+      // The uptime pinger, which has always stored history and never
+      // been called by anything. A monitor you have to press is not a
+      // monitor: the whole value is noticing the outage you were not
+      // watching for, and until now the only pings on record were ones
+      // somebody clicked for.
+      //
+      // Fifteen minutes rather than hourly. An hour of downtime found
+      // 59 minutes late is the same as not finding it.
+      id: "uptime_ping",
+      label: "Uptime checks",
+      everyMs: 15 * MINUTE,
+      run: async () => (await import("./uptime")).pingAll(),
+      summarise: (r) => {
+        const s = r as { total?: number; failed?: number } | null;
+        if (!s || typeof s.total !== "number" || s.total === 0) return null;
+        return s.failed
+          ? `${s.failed} of ${s.total} targets down`
+          : `${s.total} target${s.total === 1 ? "" : "s"} up`;
+      },
+    },
+    {
+      // Daily. This said hourly while the runner it called kept its own
+      // 24h gate, so the real cadence was daily and the screen was wrong.
+      id: "page_monitor",
+      label: "Page monitor",
+      everyMs: 24 * HOUR,
+      staleMs: 2 * HOUR,
+      run: async () => (await import("./report-mailer")).tickPageMonitorRunner(),
+    },
+    {
+      id: "weekly_digest",
+      label: "Weekly digest",
+      everyMs: 6 * HOUR,
+      run: async () => (await import("./weekly-digest")).tickWeeklyDigestRunner(),
+    },
+    {
+      id: "auto_backup",
+      label: "Automatic backup",
+      everyMs: 12 * HOUR,
+      run: async () => (await import("./auto-backup")).tickAutoBackup(),
+    },
+    {
+      // The checks that can run unattended, for every client. Without
+      // this a tool only ever runs when someone opens it, which is the
+      // difference between a tool that finds things and a tool that
+      // would have found things.
+      id: "tool_sweep",
+      label: "Unattended tool sweep",
+      everyMs: 24 * HOUR,
+      staleMs: 3 * HOUR,
+      run: async () => (await import("./tool-sweep")).tickToolSweep("daily"),
+      // The one runner where "finished without throwing" and "did the
+      // job" came apart badly: against an unreachable site it completed
+      // every night having reached nothing, and said so nowhere. The
+      // wording lives with the sweep so it can be tested.
+      summarise: (result) => summariseSweep(result),
+    },
+    {
+      // Business Profile. Twice a day, because the thing it looks for is
+      // an unanswered review, and the target for replying is 48 hours —
+      // a daily check leaves no margin, and a review that arrives after
+      // the run would sit a full day before anyone heard about it.
+      //
+      // Cheap: one accounts call, one locations call, one reviews call
+      // per client that names a listing. Clients with no listing are not
+      // asked about at all.
+      id: "gbp_monitor",
+      label: "Business Profile checks",
+      everyMs: 12 * HOUR,
+      run: async () => (await import("./gbp-monitor")).tickGbpMonitor(),
+      summarise: (r) => summariseGbp(r),
+    },
+    {
+      // The checks that have to crawl to answer at all — canonical
+      // chains, soft 404s. They cannot meet the nightly sweep's "handful
+      // of requests" bar and never will, and the alternative was a button
+      // nobody pressed, which is not a cheaper answer but no answer.
+      //
+      // Its own job rather than a branch inside the nightly one, so a
+      // slow crawl across every client cannot delay the cheap checks.
+      id: "tool_sweep_weekly",
+      label: "Weekly crawl-based checks",
+      everyMs: 7 * 24 * HOUR,
+      staleMs: 6 * HOUR,
+      run: async () => (await import("./tool-sweep")).tickToolSweep("weekly"),
+      summarise: (r) => summariseSweep(r),
+    },
+    {
+      // Discovery, written into the profile rather than drawn on screen
+      // and thrown away. Weekly because it is the slowest thing here —
+      // a search pass plus a crawl-to-confirm per candidate — and
+      // because a backlink profile does not change by the hour.
+      id: "backlink_sync",
+      label: "Backlink discovery",
+      everyMs: 7 * 24 * HOUR,
+      staleMs: 6 * HOUR,
+      run: async () => (await import("./backlink-sync")).tickBacklinkSync(),
+    },
+    {
+      // Google's own list of ranking updates, which traffic-drop
+      // diagnosis, reports and the weekly digest line changes up against.
+      // The hand-kept list this replaced was nine months stale by the
+      // time anyone checked. One small JSON request a day.
+      id: "google_updates",
+      label: "Google ranking updates",
+      everyMs: 24 * HOUR,
+      run: async () => (await import("./google-updates-store")).refreshRankingUpdates(),
+      summarise: (r) => {
+        const s = r as { added?: number } | null;
+        return s?.added ? `${s.added} update${s.added === 1 ? "" : "s"} newer than the shipped history` : null;
+      },
+    },
+    {
+      id: "retention_cleanup",
+      label: "Data retention cleanup",
+      everyMs: 24 * HOUR,
+      run: async () => (await import("./retention-cleanup")).tickRetentionCleanup(),
+    },
+  ];
+}
+
+const startedKey = (id: string) => `scheduler.${id}.started_at` as const;
+const finishedKey = (id: string) => `scheduler.${id}.finished_at` as const;
+const errorKey = (id: string) => `scheduler.${id}.last_error` as const;
+const noteKey = (id: string) => `scheduler.${id}.last_note` as const;
+const failuresKey = (id: string) => `scheduler.${id}.failures` as const;
+
+/**
+ * After a failure, wait before trying again: 5 min, 10, 20, 40… capped at
+ * the runner's own interval. A failed runner used to retry on the very
+ * next 60-second tick, forever — a broken weekly crawl ran every minute.
+ */
+export function retryDelayMs(failures: number, everyMs: number): number {
+  if (failures <= 0) return 0;
+  return Math.min(everyMs, 5 * MINUTE * 2 ** Math.min(failures - 1, 20));
+}
+
+/** Process-local guard so one runner can't overlap itself. */
+const inFlight = new Set<string>();
+
+async function runOne(r: Runner, now: number): Promise<void> {
+  if (inFlight.has(r.id)) return;
+
+  const [startedAt, finishedAt, failuresRaw] = await Promise.all([
+    getSetting<number>(startedKey(r.id)).catch(() => null),
+    getSetting<number>(finishedKey(r.id)).catch(() => null),
+    getSetting<number>(failuresKey(r.id)).catch(() => null),
+  ]);
+  const failures = typeof failuresRaw === "number" ? failuresRaw : 0;
+
+  // Another process (or an earlier tick) is mid-run and hasn't gone
+  // stale yet — leave it alone.
+  const running =
+    typeof startedAt === "number" &&
+    (typeof finishedAt !== "number" || finishedAt < startedAt);
+  if (running && now - startedAt < (r.staleMs ?? STALE_RUN_MS)) return;
+
+  // Not due yet. Measured from the last SUCCESSFUL finish, so a run
+  // that crashed retries on the next tick instead of being treated as
+  // done for a full period — the bug that made a mid-run crash cost a
+  // whole day of automation.
+  if (typeof finishedAt === "number" && now - finishedAt < r.everyMs) return;
+
+  // Backing off after a failure, measured from the failed attempt.
+  if (
+    failures > 0 &&
+    typeof startedAt === "number" &&
+    now - startedAt < retryDelayMs(failures, r.everyMs)
+  ) {
+    return;
+  }
+
+  inFlight.add(r.id);
+  await setSetting(startedKey(r.id), now).catch(() => undefined);
+  try {
+    const result = await r.run();
+    await setSetting(finishedKey(r.id), Date.now()).catch(() => undefined);
+    await setSetting(errorKey(r.id), null).catch(() => undefined);
+    await setSetting(failuresKey(r.id), 0).catch(() => undefined);
+    // Written even when null, so a note from a previous run cannot
+    // outlive the run it described.
+    await setSetting(
+      noteKey(r.id),
+      r.summarise?.(result) ?? null,
+    ).catch(() => undefined);
+  } catch (err) {
+    // Record and move on. One failing runner must not stop the others,
+    // and the error needs to be visible in Settings rather than only in
+    // a log the user will never open.
+    console.error(`[scheduler] ${r.id} failed:`, (err as Error).message);
+    await setSetting(errorKey(r.id), (err as Error).message).catch(
+      () => undefined,
+    );
+    await setSetting(failuresKey(r.id), failures + 1).catch(() => undefined);
+    // Leave finished_at alone so it is retried — after a backoff.
+  } finally {
+    inFlight.delete(r.id);
+  }
+}
+
+let timer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Run every due runner once. Safe to call from anywhere — the dashboard
+ * calls it on load so a just-restarted process catches up immediately
+ * instead of waiting a full tick.
+ */
+let tickRunning = false;
+
+export async function tickScheduler(): Promise<void> {
+  // One pass at a time. The interval fires every minute whether or not
+  // the previous pass has finished, and a pass can spend an hour inside
+  // a rank sweep — so overlapping passes ran the OTHER runners in
+  // parallel with it, which is exactly what the sequential loop below
+  // exists to prevent.
+  if (tickRunning) return;
+  tickRunning = true;
+  try {
+    // Sequential: these all hit the same SQLite file and several launch
+    // browsers. Running six at once on a 1-vCPU VPS is how you get an
+    // audit that times out because the digest is holding the write lock.
+    for (const r of runners()) {
+      await runOne(r, Date.now()).catch(() => undefined);
+    }
+  } finally {
+    tickRunning = false;
+  }
+}
+
+/**
+ * Start the interval. Idempotent — repeated calls are no-ops, which
+ * matters because Next re-imports modules on hot reload.
+ *
+ * `unref()` keeps the timer from holding the process open on its own,
+ * so `docker stop` and Ctrl-C still exit promptly.
+ */
+export function startScheduler(): void {
+  if (timer) return;
+  if (process.env.SEO_DISABLE_SCHEDULER === "1") return;
+
+  timer = setInterval(() => {
+    void tickScheduler().catch(() => undefined);
+  }, TICK_MS);
+  timer.unref?.();
+
+  // Kick once on boot, after a short delay so it doesn't compete with
+  // the server's own startup work.
+  const kickoff = setTimeout(() => {
+    void tickScheduler().catch(() => undefined);
+  }, 10_000);
+  kickoff.unref?.();
+}
+
+export type SchedulerStatus = {
+  id: string;
+  label: string;
+  everyMs: number;
+  lastFinishedAt: number | null;
+  lastStartedAt: number | null;
+  lastError: string | null;
+  /** What the last successful run did, when that is worth saying. */
+  lastNote: string | null;
+  running: boolean;
+  dueInMs: number | null;
+};
+
+/** Read the state of every runner, for the Settings → Automations view. */
+export async function schedulerStatus(): Promise<SchedulerStatus[]> {
+  const now = Date.now();
+  return Promise.all(
+    runners().map(async (r) => {
+      const [startedAt, finishedAt, lastError, lastNote] = await Promise.all([
+        getSetting<number>(startedKey(r.id)).catch(() => null),
+        getSetting<number>(finishedKey(r.id)).catch(() => null),
+        getSetting<string>(errorKey(r.id)).catch(() => null),
+        getSetting<string>(noteKey(r.id)).catch(() => null),
+      ]);
+      const running =
+        typeof startedAt === "number" &&
+        (typeof finishedAt !== "number" || finishedAt < startedAt) &&
+        now - startedAt < (r.staleMs ?? STALE_RUN_MS);
+      return {
+        id: r.id,
+        label: r.label,
+        everyMs: r.everyMs,
+        lastFinishedAt: typeof finishedAt === "number" ? finishedAt : null,
+        lastStartedAt: typeof startedAt === "number" ? startedAt : null,
+        lastError: typeof lastError === "string" ? lastError : null,
+        lastNote: typeof lastNote === "string" ? lastNote : null,
+        running,
+        dueInMs:
+          typeof finishedAt === "number"
+            ? Math.max(0, r.everyMs - (now - finishedAt))
+            : 0,
+      };
+    }),
+  );
+}
